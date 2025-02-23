@@ -32,11 +32,12 @@ class LeagueGUI:
         self.summoner_name = tk.StringVar(value="Waiting for connection...")
         self.game_status = tk.StringVar(value="Not Connected")
         self.champ_select_phase = tk.StringVar(value="N/A")
-        self.auto_accept_var = tk.BooleanVar(value=False)  # Auto-accept toggle
-        self.auto_ban_var = tk.StringVar(value="None")  # Auto-ban champion
-        self.auto_pick_var = tk.StringVar(value="None")  # Auto-pick champion
-        self.ban_search_var = tk.StringVar()  # Search bar for auto-ban
-        self.pick_search_var = tk.StringVar()  # Search bar for auto-pick
+        self.selected_roles = tk.StringVar(value="Roles: N/A")  # New variable for roles
+        self.auto_accept_var = tk.BooleanVar(value=False)
+        self.auto_ban_var = tk.StringVar(value="None")
+        self.auto_pick_var = tk.StringVar(value="None")
+        self.ban_search_var = tk.StringVar()
+        self.pick_search_var = tk.StringVar()
 
         # Summoner Name Label
         ttk.Label(root, text="Summoner:").pack(pady=5)
@@ -48,6 +49,11 @@ class LeagueGUI:
         self.status_label = ttk.Label(root, textvariable=self.game_status, font=("Arial", 10))
         self.status_label.pack()
 
+        # Selected Roles Label
+        ttk.Label(root, text="Selected Roles:").pack(pady=5)  # New label for roles
+        self.roles_label = ttk.Label(root, textvariable=self.selected_roles, font=("Arial", 10))
+        self.roles_label.pack()
+
         # Champion Select Phase Label
         ttk.Label(root, text="Champion Select Phase:").pack(pady=5)
         self.phase_label = ttk.Label(root, textvariable=self.champ_select_phase, font=("Arial", 10))
@@ -57,28 +63,36 @@ class LeagueGUI:
         self.auto_accept_button = ttk.Checkbutton(root, text="Auto-Accept Matches", variable=self.auto_accept_var)
         self.auto_accept_button.pack(pady=10)
 
-        # Auto-Ban Dropdown
-        ttk.Label(root, text="Auto-Ban Champion:").pack(pady=5)
-        self.auto_ban_dropdown = ttk.Combobox(root, textvariable=self.auto_ban_var)
+        # Create a frame for auto-ban and auto-pick (side by side layout)
+        ban_pick_frame = ttk.Frame(root)
+        ban_pick_frame.pack(pady=5, fill="x")
+
+        # Auto-Ban Section
+        auto_ban_frame = ttk.Frame(ban_pick_frame)
+        auto_ban_frame.pack(side="left", padx=10, expand=True)
+
+        ttk.Label(auto_ban_frame, text="Auto-Ban Champion:").pack(pady=2)
+        self.auto_ban_dropdown = ttk.Combobox(auto_ban_frame, textvariable=self.auto_ban_var)
         self.auto_ban_dropdown['values'] = ["None"] + list(champions_map.keys())
-        self.auto_ban_dropdown.pack(pady=5)
+        self.auto_ban_dropdown.pack(pady=2)
 
-        # Auto-Pick Dropdown
-        ttk.Label(root, text="Auto-Pick Champion:").pack(pady=5)
-        self.auto_pick_dropdown = ttk.Combobox(root, textvariable=self.auto_pick_var)
-        self.auto_pick_dropdown['values'] = ["None"] + list(champions_map.keys())
-        self.auto_pick_dropdown.pack(pady=5)
-
-        # Search Bar for Auto-Ban
-        ttk.Label(root, text="Search Auto-Ban Champion:").pack(pady=5)
-        self.ban_search_entry = ttk.Entry(root, textvariable=self.ban_search_var)
-        self.ban_search_entry.pack(pady=5)
+        ttk.Label(auto_ban_frame, text="Search:").pack(pady=2)
+        self.ban_search_entry = ttk.Entry(auto_ban_frame, textvariable=self.ban_search_var)
+        self.ban_search_entry.pack(pady=2)
         self.ban_search_entry.bind('<KeyRelease>', self.filter_auto_ban_dropdown)
 
-        # Search Bar for Auto-Pick
-        ttk.Label(root, text="Search Auto-Pick Champion:").pack(pady=5)
-        self.pick_search_entry = ttk.Entry(root, textvariable=self.pick_search_var)
-        self.pick_search_entry.pack(pady=5)
+        # Auto-Pick Section
+        auto_pick_frame = ttk.Frame(ban_pick_frame)
+        auto_pick_frame.pack(side="right", padx=10, expand=True)
+
+        ttk.Label(auto_pick_frame, text="Auto-Pick Champion:").pack(pady=2)
+        self.auto_pick_dropdown = ttk.Combobox(auto_pick_frame, textvariable=self.auto_pick_var)
+        self.auto_pick_dropdown['values'] = ["None"] + list(champions_map.keys())
+        self.auto_pick_dropdown.pack(pady=2)
+
+        ttk.Label(auto_pick_frame, text="Search:").pack(pady=2)
+        self.pick_search_entry = ttk.Entry(auto_pick_frame, textvariable=self.pick_search_var)
+        self.pick_search_entry.pack(pady=2)
         self.pick_search_entry.bind('<KeyRelease>', self.filter_auto_pick_dropdown)
 
         # Bind the dropdowns to save the last selection when changed
@@ -87,6 +101,10 @@ class LeagueGUI:
 
         # Load last selected ban and pick
         self.load_last_selection()
+
+        # Quit Button
+        self.quit_button = ttk.Button(root, text="Quit", command=self.quit_program)
+        self.quit_button.pack(pady=20)
 
         # Start the GUI update loop
         self.update_gui()
@@ -122,6 +140,12 @@ class LeagueGUI:
         # Schedule the function to run again after 1 second
         self.root.after(1000, self.update_gui)
 
+    def quit_program(self):
+        # Stop the LCU connector
+        asyncio.run_coroutine_threadsafe(connector.stop(), loop)
+        # Close the GUI
+        self.root.destroy()
+
 
 async def update_lobby_info(connection):
     global gui, in_game
@@ -130,15 +154,34 @@ async def update_lobby_info(connection):
             # Get the current lobby information
             lobby_info = await connection.request('get', '/lol-lobby/v2/lobby')
             lobby_info_json = await lobby_info.json()
+            print("Lobby Info:", lobby_info_json)  # Debug: Print the entire lobby info
+
             game_mode = lobby_info_json.get('gameConfig', {}).get('gameMode', 'Unknown')
             gui.game_status.set(f"Connected - Game Mode: {game_mode}")  # Update game status with game mode
-            print(f"Current game mode: {game_mode}")  # Debug print
+
+            # Fetch the player's selected roles from the localMember section
+            local_player_roles = "N/A"  # Default value
+
+            local_member = lobby_info_json.get('localMember', {})
+            first_role = local_member.get('firstPositionPreference', '')
+            second_role = local_member.get('secondPositionPreference', '')
+
+            if first_role or second_role:
+                local_player_roles = f"{first_role}, {second_role}"
+
+
+            # Update the roles label in the GUI
+            gui.selected_roles.set(f"Roles: {local_player_roles}")
+
+            print(f"Current game mode: {game_mode}, Roles: {local_player_roles}")  # Debug print
         except Exception as e:
             print(f"Error retrieving lobby info: {e}")
             gui.game_status.set("Connected - Game Mode: Unknown")  # Fallback if lobby info retrieval fails
+            gui.selected_roles.set("Roles: N/A")  # Fallback for roles
 
         # Wait for 5 seconds before fetching again
         await asyncio.sleep(5)
+
 
 
 @connector.ready
@@ -271,7 +314,10 @@ async def disconnect(_):
 
 # Function to start the LCU connector in a separate thread
 def start_connector():
-    connector.start()
+    global loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(connector.start())
 
 
 # Start the LCU connector in a separate thread
@@ -282,4 +328,8 @@ connector_thread.start()
 # Start the GUI
 root = tk.Tk()
 gui = LeagueGUI(root)  # Create the GUI object
+
+# Handle window close event
+root.protocol("WM_DELETE_WINDOW", gui.quit_program)
+
 root.mainloop()
