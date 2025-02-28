@@ -65,14 +65,15 @@ Navigate to the project directory and run:
 ```bash
 pyinstaller --onefile --windowed --add-data "music.txt;." GUI.py
 ```
-The `--onefile` flag bundles everything into a single executable.
+* The `--onefile` flag bundles everything into a single executable.
 
-The `--windowed` flag prevents a terminal window from appearing when running the tool.
+* The `--windowed` flag prevents a terminal window from appearing when running the tool.
 
-The `--add-data` flag will include the `.txt` file with the executable.
+* The `--add-data` flag will include the `.txt` file with the executable.
+
 3. **Locate the Executable:**
 
-The `.exe` file will be created in the `dist` folder inside your project directory.
+* The `.exe` file will be created in the `dist` folder inside your project directory.
 
 ## Configuration File
 

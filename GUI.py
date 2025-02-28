@@ -657,15 +657,15 @@ def start_connector():
     asyncio.set_event_loop(loop)
     loop.run_until_complete(connector.start())
 
+# Start the GUI
+root = tk.Tk()
+gui = LeagueGUI(root)  # Create the GUI object
 
 # Start the LCU connector in a separate thread
 connector_thread = threading.Thread(target=start_connector)
 connector_thread.daemon = True  # Daemonize thread to exit when the main program exits
 connector_thread.start()
 
-# Start the GUI
-root = tk.Tk()
-gui = LeagueGUI(root)  # Create the GUI object
 
 # Handle window close event
 root.protocol("WM_DELETE_WINDOW", gui.quit_program)
