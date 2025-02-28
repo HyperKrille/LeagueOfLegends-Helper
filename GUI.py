@@ -15,20 +15,38 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 connector = Connector()
 
 # Global variables
-global am_i_assigned, am_i_banning, am_i_picking, phase, in_game, summoner_name, game_mode, champions_map, action_id, current_lobby_state, current_assigned_position, client_connected, client_closed
-am_i_assigned = False
-am_i_banning = False
-am_i_picking = False
-in_game = False
-phase = ''
-action_id = None
-summoner_name = "Waiting for connection..."
-game_mode = "Not Connected"
+global champions_map, client_connected, client_closed, gui
 champions_map = {}
-current_lobby_state = "NONE"
-current_assigned_position = "NONE"
 client_connected = False  # Tracks if the client is connected
 client_closed = False  # Tracks if the client has been closed
+
+
+class GameState:
+    """Class to manage game-related states."""
+    def __init__(self):
+        self.am_i_assigned = False
+        self.am_i_banning = False
+        self.am_i_picking = False
+        self.phase = ''
+        self.in_game = False
+        self.action_id = None
+        self.current_lobby_state = "NONE"
+        self.current_assigned_position = "NONE"
+
+    def reset(self):
+        """Reset all states to default values."""
+        self.am_i_assigned = False
+        self.am_i_banning = False
+        self.am_i_picking = False
+        self.phase = ''
+        self.in_game = False
+        self.action_id = None
+        self.current_lobby_state = "NONE"
+        self.current_assigned_position = "NONE"
+
+
+# Create a global instance of GameState
+game_state = GameState()
 
 
 class LeagueGUI:
@@ -116,10 +134,10 @@ class LeagueGUI:
         self.log_text = tk.Text(log_frame, height=10, width=60, wrap="word", font=("Arial", 10))
         self.log_text.pack(pady=5, padx=5, fill="both", expand=True)
 
-        # Scrollbar for log
-        scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.log_text.config(yscrollcommand=scrollbar.set)
+        # # Scrollbar for log
+        # scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        # scrollbar.pack(side="right", fill="y")
+        # self.log_text.config(yscrollcommand=scrollbar.set)
 
         # Quit Button
         self.quit_button = ttk.Button(root, text="Quit", command=self.quit_program, style="TButton")
@@ -132,7 +150,7 @@ class LeagueGUI:
         self.update_gui()
 
     def setup_role_tab(self, role, tab):
-        """Set up the widgets for a role tab"""
+        """Set up the widgets for a role tab."""
         # Auto-Ban Section
         auto_ban_frame = ttk.LabelFrame(tab, text="Auto-Ban Champion")
         auto_ban_frame.pack(pady=10, padx=10, fill="x")
@@ -170,7 +188,7 @@ class LeagueGUI:
         auto_pick_dropdown.bind("<<ComboboxSelected>>", lambda event: self.save_configuration())
 
     def filter_dropdown(self, role, dropdown_type):
-        """Filter the champion dropdown based on search text"""
+        """Filter the champion dropdown based on search text."""
         if dropdown_type == "ban":
             search_text = self.role_configs[role]["ban_search_var"].get().lower()
             dropdown = self.role_configs[role]["ban_dropdown"]
@@ -182,13 +200,13 @@ class LeagueGUI:
         dropdown['values'] = ["None"] + filtered_champs
 
     def log_message(self, message):
-        """Add a message to the log with timestamp"""
+        """Add a message to the log with timestamp."""
         timestamp = time.strftime("%H:%M:%S", time.localtime())
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.log_text.see(tk.END)  # Auto-scroll to the end
 
     def load_configuration(self):
-        """Load role-specific configuration from file"""
+        """Load role-specific configuration from file."""
         try:
             if os.path.exists("role_config.json"):
                 with open("role_config.json", "r") as file:
@@ -213,7 +231,7 @@ class LeagueGUI:
             self.log_message(f"Error loading configuration: {e}")
 
     def save_configuration(self):
-        """Save role-specific configuration to file"""
+        """Save role-specific configuration to file."""
         try:
             config = {"auto_accept": self.auto_accept_var.get()}
 
@@ -231,28 +249,13 @@ class LeagueGUI:
         except Exception as e:
             self.log_message(f"Error saving configuration: {e}")
 
-    def reset_states(self):
-        global am_i_assigned, am_i_banning, am_i_picking, phase, in_game, action_id, current_lobby_state, current_assigned_position, client_connected
-        am_i_assigned = False
-        am_i_banning = False
-        am_i_picking = False
-        phase = ''
-        in_game = False
-        action_id = None
-        current_lobby_state = "NONE"
-        current_assigned_position = "NONE"
-        client_connected = False  # Reset connection state
-        self.champ_select_phase.set("N/A")
-        self.selected_roles.set("Roles: N/A")
-        self.game_status.set("Connected - Waiting for Queue")
-        self.log_message("States reset: ready for a new game")
-
     def update_gui(self):
+        """Update the GUI periodically."""
         # Update notebook selection based on assigned role
-        if current_assigned_position in self.roles:
+        if game_state.current_assigned_position in self.roles:
             # Find the index of the tab that corresponds to the current role
             for i, role in enumerate(self.roles):
-                if role == current_assigned_position:
+                if role == game_state.current_assigned_position:
                     self.notebook.select(i)
                     break
 
@@ -260,7 +263,7 @@ class LeagueGUI:
         self.root.after(1000, self.update_gui)
 
     def update_champion_dropdowns(self):
-        """Update all champion dropdowns with the current champion list"""
+        """Update all champion dropdowns with the current champion list."""
         for role in self.roles:
             ban_dropdown = self.role_configs[role]["ban_dropdown"]
             pick_dropdown = self.role_configs[role]["pick_dropdown"]
@@ -285,6 +288,7 @@ class LeagueGUI:
                 self.role_configs[role]["pick_var"].set("None")
 
     def quit_program(self):
+        """Handle program exit."""
         # Save configuration before exiting
         self.save_configuration()
         # Stop the LCU connector
@@ -294,8 +298,8 @@ class LeagueGUI:
 
 
 async def check_game_phase(connection):
-    """Continuously checks for the current game phase with reduced API calls"""
-    global gui, in_game, current_lobby_state, client_connected
+    """Continuously checks for the current game phase with reduced API calls."""
+    global gui, game_state, client_connected
 
     # Track last known states to avoid redundant API calls
     last_champ_select_status = 0
@@ -308,7 +312,7 @@ async def check_game_phase(connection):
             game_running = False
 
             # Only check if in game every 5 seconds
-            if not in_game and current_time - last_game_check_time >= 5:
+            if not game_state.in_game and current_time - last_game_check_time >= 5:
                 last_game_check_time = current_time
                 try:
                     game_check = requests.get('https://127.0.0.1:2999/liveclientdata/activeplayer',
@@ -318,9 +322,9 @@ async def check_game_phase(connection):
                     game_running = False
 
             # If we're in a game, only check game status, not the other endpoints
-            if game_running and not in_game:
-                in_game = True
-                current_lobby_state = "IN_GAME"
+            if game_running and not game_state.in_game:
+                game_state.in_game = True
+                game_state.current_lobby_state = "IN_GAME"
                 gui.game_status.set("In Game")
                 gui.log_message("Game detected - now in active game")
 
@@ -339,17 +343,17 @@ async def check_game_phase(connection):
                 continue
 
             # If already in game, only check if game has ended
-            if in_game:
+            if game_state.in_game:
                 try:
                     game_check = requests.get('https://127.0.0.1:2999/liveclientdata/activeplayer',
                                               verify=False, timeout=1)
                     if game_check.status_code != 200:
-                        in_game = False
-                        gui.reset_states()
+                        game_state.in_game = False
+                        game_state.reset()  # Reset states when the game ends
                         gui.log_message("Game has ended")
                 except:
-                    in_game = False
-                    gui.reset_states()
+                    game_state.in_game = False
+                    game_state.reset()  # Reset states when the game ends
                     gui.log_message("Game has ended")
 
                 # Check less frequently while in game
@@ -359,12 +363,12 @@ async def check_game_phase(connection):
             # If not in game, check other states with reduced frequency
 
             # Only check champ select if we're not known to be in it
-            if current_lobby_state != "CHAMP_SELECT":
+            if game_state.current_lobby_state != "CHAMP_SELECT":
                 champ_select = await connection.request('get', '/lol-champ-select/v1/session')
                 last_champ_select_status = champ_select.status
 
-                if last_champ_select_status == 200 and current_lobby_state != "CHAMP_SELECT":
-                    current_lobby_state = "CHAMP_SELECT"
+                if last_champ_select_status == 200 and game_state.current_lobby_state != "CHAMP_SELECT":
+                    game_state.current_lobby_state = "CHAMP_SELECT"
                     gui.game_status.set("In Champion Select")
                     gui.log_message("Now in champion select")
 
@@ -373,12 +377,12 @@ async def check_game_phase(connection):
                     continue
 
             # Only check matchmaking if we're not known to be in queue
-            if current_lobby_state != "MATCHMAKING" and current_lobby_state != "CHAMP_SELECT":
+            if game_state.current_lobby_state != "MATCHMAKING" and game_state.current_lobby_state != "CHAMP_SELECT":
                 matchmaking = await connection.request('get', '/lol-matchmaking/v1/search')
                 last_matchmaking_status = matchmaking.status
 
-                if last_matchmaking_status == 200 and current_lobby_state != "MATCHMAKING":
-                    current_lobby_state = "MATCHMAKING"
+                if last_matchmaking_status == 200 and game_state.current_lobby_state != "MATCHMAKING":
+                    game_state.current_lobby_state = "MATCHMAKING"
                     gui.game_status.set("In Queue")
                     gui.log_message("Searching for a match")
 
@@ -387,8 +391,8 @@ async def check_game_phase(connection):
                     continue
 
             # If we're not in any of the above states, assume lobby
-            if current_lobby_state != "LOBBY" and last_champ_select_status != 200 and last_matchmaking_status != 200:
-                current_lobby_state = "LOBBY"
+            if game_state.current_lobby_state != "LOBBY" and last_champ_select_status != 200 and last_matchmaking_status != 200:
+                game_state.current_lobby_state = "LOBBY"
                 gui.game_status.set("In Lobby")
                 gui.log_message("Now in lobby")
 
@@ -398,17 +402,17 @@ async def check_game_phase(connection):
             await asyncio.sleep(5)  # Add delay after errors
 
         # Adaptive sleep time based on current state
-        if current_lobby_state == "MATCHMAKING":
+        if game_state.current_lobby_state == "MATCHMAKING":
             await asyncio.sleep(2)  # Check more frequently in queue for ready check
-        elif current_lobby_state == "CHAMP_SELECT":
+        elif game_state.current_lobby_state == "CHAMP_SELECT":
             await asyncio.sleep(3)  # Moderate frequency in champ select
         else:
             await asyncio.sleep(5)  # Longer delay in lobby or other states
 
 
 async def update_lobby_info(connection):
-    """Updates lobby info with reduced API calls"""
-    global gui, in_game, current_lobby_state, client_connected
+    """Updates lobby info with reduced API calls."""
+    global gui, game_state, client_connected
 
     # Track the last time we updated lobby info
     last_update_time = 0
@@ -418,12 +422,12 @@ async def update_lobby_info(connection):
             current_time = time.time()
 
             # Skip checking if in game or if recently checked
-            if in_game or current_lobby_state == "NONE" or current_time - last_update_time < 5:
+            if game_state.in_game or game_state.current_lobby_state == "NONE" or current_time - last_update_time < 5:
                 await asyncio.sleep(3)
                 continue
 
             # Only update lobby info when in LOBBY state to reduce API calls
-            if current_lobby_state == "LOBBY":
+            if game_state.current_lobby_state == "LOBBY":
                 # Get the current lobby information
                 lobby_info = await connection.request('get', '/lol-lobby/v2/lobby')
                 last_update_time = current_time
@@ -460,6 +464,27 @@ async def update_lobby_info(connection):
         await asyncio.sleep(5)
 
 
+@connector.ws.register('/lol-gameflow/v1/gameflow-phase', event_types=('UPDATE',))
+async def gameflow_changed(connection, event):
+    global game_state, gui
+
+    new_phase = event.data
+    gui.log_message(f"Game flow phase changed: {new_phase}")
+
+    # Reset tracking variables when leaving champion select
+    if new_phase != "ChampSelect" and game_state.current_lobby_state == "CHAMP_SELECT":
+        gui.log_message("Champion select ended - possible dodge or cancelled queue")
+        game_state.reset()
+        # Clear last ban/pick tracking to ensure they work in next champ select
+        if hasattr(champ_select_changed, 'last_ban'):
+            delattr(champ_select_changed, 'last_ban')
+        if hasattr(champ_select_changed, 'last_pick'):
+            delattr(champ_select_changed, 'last_pick')
+        if hasattr(champ_select_changed, 'last_prepick'):
+            delattr(champ_select_changed, 'last_prepick')
+        if hasattr(champ_select_changed, 'last_role_config'):
+            delattr(champ_select_changed, 'last_role_config')
+
 @connector.ready
 async def connect(connection):
     global client_connected, gui, champions_map
@@ -491,7 +516,7 @@ async def connect(connection):
     gui.update_champion_dropdowns()
 
     # Make sure states are reset on startup
-    gui.reset_states()
+    game_state.reset()
 
     # Start the update loops
     asyncio.create_task(update_lobby_info(connection))
@@ -510,12 +535,12 @@ async def ready_check_changed(connection, event):
 
 @connector.ws.register('/lol-champ-select/v1/session', event_types=('CREATE', 'UPDATE', 'DELETE'))
 async def champ_select_changed(connection, event):
-    global am_i_assigned, am_i_banning, am_i_picking, phase, in_game, action_id, current_lobby_state, current_assigned_position
+    global game_state, gui
 
     # Check if the session is deleted (queue dodged)
     if event.type == 'DELETE':
         gui.log_message("Champion select ended - session deleted")
-        gui.reset_states()
+        game_state.reset()  # Reset states when champion select ends
         return
 
     # Handle champion select
@@ -524,8 +549,8 @@ async def champ_select_changed(connection, event):
         gui.champ_select_phase.set(lobby_phase)
 
         # Update the current state if it changed
-        if current_lobby_state != "CHAMP_SELECT":
-            current_lobby_state = "CHAMP_SELECT"
+        if game_state.current_lobby_state != "CHAMP_SELECT":
+            game_state.current_lobby_state = "CHAMP_SELECT"
             gui.game_status.set(f"Champion Select - {lobby_phase}")
             gui.log_message(f"Champion select phase: {lobby_phase}")
 
@@ -537,7 +562,7 @@ async def champ_select_changed(connection, event):
             for teammate in event.data['myTeam']:
                 if teammate['cellId'] == local_player_cell_id:
                     # Get the assigned position from the client
-                    teammate['assignedPosition'] = 'jungle'
+                    #teammate['assignedPosition'] = 'jungle' #for testing
                     assigned_position = teammate.get('assignedPosition', '').upper()  # Ensure uppercase for consistency
 
                     # Convert empty string to 'Unknown' for better logging
@@ -545,9 +570,9 @@ async def champ_select_changed(connection, event):
                         assigned_position = 'UNKNOWN'
 
                     # Update the assigned position if it's changed
-                    if not am_i_assigned or current_assigned_position != assigned_position:
-                        am_i_assigned = True
-                        current_assigned_position = assigned_position
+                    if not game_state.am_i_assigned or game_state.current_assigned_position != assigned_position:
+                        game_state.am_i_assigned = True
+                        game_state.current_assigned_position = assigned_position
                         gui.log_message(f"Assigned position: {assigned_position}")
 
                         # If valid position, auto-select the corresponding tab
@@ -563,67 +588,69 @@ async def champ_select_changed(connection, event):
                 for action in action_group:
                     if action['actorCellId'] == local_player_cell_id and action['isInProgress'] == True:
                         # Only log if this is a new phase
-                        if phase != action['type']:
-                            phase = action['type']
-                            gui.log_message(f"Your turn to {phase.upper()}")
+                        if game_state.phase != action['type']:
+                            game_state.phase = action['type']
+                            gui.log_message(f"Your turn to {game_state.phase.upper()}")
 
-                        action_id = action['id']
+                        game_state.action_id = action['id']
 
-                        if phase == 'ban':
-                            am_i_banning = action['isInProgress']
-                        if phase == 'pick':
-                            am_i_picking = action['isInProgress']
+                        if game_state.phase == 'ban':
+                            game_state.am_i_banning = action['isInProgress']
+                        if game_state.phase == 'pick':
+                            game_state.am_i_picking = action['isInProgress']
 
             # Get the role-specific champions based on assigned position
             role_config = None
 
             # First try to use the assigned position from the client
-            if current_assigned_position in gui.roles:
-                role_config = gui.role_configs[current_assigned_position]
-                if not hasattr(champ_select_changed, 'last_role_config') or champ_select_changed.last_role_config != current_assigned_position:
-                    gui.log_message(f"Using champion settings for assigned role: {current_assigned_position}")
-                    champ_select_changed.last_role_config = current_assigned_position  # Track last used role config
+            if game_state.current_assigned_position in gui.roles:
+                role_config = gui.role_configs[game_state.current_assigned_position]
+                if not hasattr(champ_select_changed, 'last_role_config') or champ_select_changed.last_role_config != game_state.current_assigned_position:
+                    gui.log_message(f"Using champion settings for assigned role: {game_state.current_assigned_position}")
+                    champ_select_changed.last_role_config = game_state.current_assigned_position  # Track last used role config
             else:
                 # If no valid assigned position, log a warning but don't fall back to another role
                 if not hasattr(champ_select_changed, 'last_role_config') or champ_select_changed.last_role_config != 'UNKNOWN':
-                    gui.log_message(f"No valid assigned role detected. Assigned position: {current_assigned_position}")
+                    gui.log_message(f"No valid assigned role detected. Assigned position: {game_state.current_assigned_position}")
                     champ_select_changed.last_role_config = 'UNKNOWN'  # Track last used role config
 
             # Auto-ban logic
-            if phase == 'ban' and lobby_phase == 'BAN_PICK' and am_i_banning and action_id is not None and role_config:
+            if game_state.phase == 'ban' and lobby_phase == 'BAN_PICK' and game_state.am_i_banning and game_state.action_id is not None and role_config:
                 selected_ban = role_config["ban_var"].get()
                 if selected_ban != "None" and selected_ban in champions_map:
-                    if not hasattr(champ_select_changed, 'last_ban') or champ_select_changed.last_ban != selected_ban:
-                        try:
-                            await connection.request('patch', f'/lol-champ-select/v1/session/actions/{action_id}',
-                                                     data={"championId": champions_map[selected_ban], "completed": True})
-                            gui.log_message(f"Auto-banned {selected_ban}")
-                            champ_select_changed.last_ban = selected_ban  # Track last banned champion
-                        except Exception as e:
-                            gui.log_message(f"Error auto-banning {selected_ban}: {e}")
-                am_i_banning = False
+                    try:
+                        # Don't check for last_ban to ensure it always attempts to ban
+                        await connection.request('patch',
+                                                 f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
+                                                 data={"championId": champions_map[selected_ban], "completed": True})
+                        gui.log_message(f"Auto-banned {selected_ban}")
+                        champ_select_changed.last_ban = selected_ban  # Track last banned champion
+                    except Exception as e:
+                        gui.log_message(f"Error auto-banning {selected_ban}: {e}")
+                game_state.am_i_banning = False
 
             # Auto-pick logic
-            if phase == 'pick' and lobby_phase == 'BAN_PICK' and am_i_picking and action_id is not None and role_config:
+            if game_state.phase == 'pick' and lobby_phase == 'BAN_PICK' and game_state.am_i_picking and game_state.action_id is not None and role_config:
                 selected_pick = role_config["pick_var"].get()
                 if selected_pick != "None" and selected_pick in champions_map:
-                    if not hasattr(champ_select_changed, 'last_pick') or champ_select_changed.last_pick != selected_pick:
-                        try:
-                            await connection.request('patch', f'/lol-champ-select/v1/session/actions/{action_id}',
-                                                     data={"championId": champions_map[selected_pick], "completed": True})
-                            gui.log_message(f"Auto-picked {selected_pick}")
-                            champ_select_changed.last_pick = selected_pick  # Track last picked champion
-                        except Exception as e:
-                            gui.log_message(f"Error auto-picking {selected_pick}: {e}")
-                am_i_picking = False
+                    try:
+                        # Don't check for last_pick to ensure it always attempts to pick
+                        await connection.request('patch',
+                                                 f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
+                                                 data={"championId": champions_map[selected_pick], "completed": True})
+                        gui.log_message(f"Auto-picked {selected_pick}")
+                        champ_select_changed.last_pick = selected_pick  # Track last picked champion
+                    except Exception as e:
+                        gui.log_message(f"Error auto-picking {selected_pick}: {e}")
+                game_state.am_i_picking = False
 
             # Pre-pick in PLANNING phase
-            if lobby_phase == 'PLANNING' and action_id is not None and role_config:
+            if lobby_phase == 'PLANNING' and game_state.action_id is not None and role_config:
                 selected_pick = role_config["pick_var"].get()
                 if selected_pick != "None" and selected_pick in champions_map:
                     if not hasattr(champ_select_changed, 'last_prepick') or champ_select_changed.last_prepick != selected_pick:
                         try:
-                            await connection.request('patch', f'/lol-champ-select/v1/session/actions/{action_id}',
+                            await connection.request('patch', f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
                                                      data={"championId": champions_map[selected_pick], "completed": False})
                             gui.log_message(f"Pre-picked {selected_pick}")
                             champ_select_changed.last_prepick = selected_pick  # Track last pre-picked champion
@@ -631,8 +658,8 @@ async def champ_select_changed(connection, event):
                             gui.log_message(f"Error pre-picking {selected_pick}: {e}")
 
         # Set up game start detection for finalization phase
-        if lobby_phase == 'FINALIZATION' and current_lobby_state != "GAME_STARTING":
-            current_lobby_state = "GAME_STARTING"
+        if lobby_phase == 'FINALIZATION' and game_state.current_lobby_state != "GAME_STARTING":
+            game_state.current_lobby_state = "GAME_STARTING"
             gui.game_status.set("Game Starting...")
             gui.log_message("Game is about to start")
 
