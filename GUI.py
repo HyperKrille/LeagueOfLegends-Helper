@@ -123,10 +123,6 @@ class LeagueGUI:
         self.auto_accept_button = ttk.Checkbutton(info_frame, text="Auto-Accept Matches", variable=self.auto_accept_var)
         self.auto_accept_button.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=5)
 
-        # Dodge Button
-        self.dodge_button = ttk.Button(info_frame, text="Dodge Game", command=self.dodge_game, state=tk.DISABLED)
-        self.dodge_button.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=5)
-
         # Notebook (Tabbed View for Roles)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(pady=10, padx=10, fill="both", expand=True)
@@ -146,13 +142,26 @@ class LeagueGUI:
         self.log_text = tk.Text(log_frame, height=10, width=60, wrap="word", font=("Arial", 10))
         self.log_text.pack(pady=5, padx=5, fill="both", expand=True)
 
+        # Bottom frame for buttons
+        button_frame = ttk.Frame(root)
+        button_frame.pack(pady=10, padx=10, fill="x")
+
+        # Dodge Button
+        self.dodge_button = ttk.Button(button_frame, text="Dodge Game", command=self.dodge_game, state=tk.DISABLED)
+        self.dodge_button.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
         # Open op.gg Button
-        self.opgg_button = ttk.Button(root, text="Open op.gg", command=self.open_opgg)
-        self.opgg_button.pack(pady=10)
+        self.opgg_button = ttk.Button(button_frame, text="Open op.gg", command=self.open_opgg)
+        self.opgg_button.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
         # Quit Button
-        self.quit_button = ttk.Button(root, text="Quit", command=self.quit_program, style="TButton")
-        self.quit_button.pack(pady=10)
+        self.quit_button = ttk.Button(button_frame, text="Quit", command=self.quit_program, style="TButton")
+        self.quit_button.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+
+        # Configure column weights to make buttons expand evenly
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
+        button_frame.columnconfigure(2, weight=1)
 
         # Load configuration
         self.load_configuration()
@@ -166,7 +175,8 @@ class LeagueGUI:
         auto_ban_frame = ttk.LabelFrame(tab, text="Auto-Ban Champion")
         auto_ban_frame.pack(pady=10, padx=10, fill="x")
 
-        ttk.Label(auto_ban_frame, text="Search:").pack(pady=2)
+        # Search bar for ban champions
+        ttk.Label(auto_ban_frame, text="Search Ban:").pack(pady=2)
         ban_search_entry = ttk.Entry(auto_ban_frame, textvariable=self.role_configs[role]["ban_search_var"])
         ban_search_entry.pack(pady=2, fill="x")
 
@@ -178,7 +188,8 @@ class LeagueGUI:
         auto_pick_frame = ttk.LabelFrame(tab, text="Auto-Pick Champion")
         auto_pick_frame.pack(pady=10, padx=10, fill="x")
 
-        ttk.Label(auto_pick_frame, text="Search:").pack(pady=2)
+        # Search bar for pick champions
+        ttk.Label(auto_pick_frame, text="Search Pick:").pack(pady=2)
         pick_search_entry = ttk.Entry(auto_pick_frame, textvariable=self.role_configs[role]["pick_search_var"])
         pick_search_entry.pack(pady=2, fill="x")
 
@@ -199,7 +210,7 @@ class LeagueGUI:
         auto_pick_dropdown.bind("<<ComboboxSelected>>", lambda event: self.save_configuration())
 
     def filter_dropdown(self, role, dropdown_type):
-        """Filter the champion dropdown based on search text."""
+        """Filter the champion dropdowns based on search text."""
         if dropdown_type == "ban":
             search_text = self.role_configs[role]["ban_search_var"].get().lower()
             dropdown = self.role_configs[role]["ban_dropdown"]
@@ -207,6 +218,7 @@ class LeagueGUI:
             search_text = self.role_configs[role]["pick_search_var"].get().lower()
             dropdown = self.role_configs[role]["pick_dropdown"]
 
+        # Filter champions based on search text
         filtered_champs = [champ for champ in champions_map.keys() if search_text in champ.lower()]
         dropdown['values'] = ["None"] + filtered_champs
 
@@ -214,6 +226,12 @@ class LeagueGUI:
         """Add a message to the log with timestamp."""
         timestamp = time.strftime("%H:%M:%S", time.localtime())
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+
+        # Limit the number of log lines to 1000
+        log_lines = self.log_text.get("1.0", tk.END).splitlines()
+        if len(log_lines) > 1000:
+            self.log_text.delete("1.0", f"{len(log_lines) - 1000}.0")
+
         self.log_text.see(tk.END)  # Auto-scroll to the end
 
     def load_configuration(self):
@@ -361,10 +379,22 @@ class LeagueGUI:
 
     def quit_program(self):
         """Handle program exit."""
+        global stop_thread
         # Save configuration before exiting
         self.save_configuration()
+
+        # Signal the thread to stop
+        stop_thread = True
+
         # Stop the LCU connector
         asyncio.run_coroutine_threadsafe(connector.stop(), loop)
+
+        # Stop the event loop
+        loop.call_soon_threadsafe(loop.stop)
+
+        # Wait for the connector thread to finish
+        connector_thread.join(timeout=2)  # Wait up to 2 seconds for the thread to exit
+
         # Close the GUI
         self.root.destroy()
 
@@ -406,6 +436,7 @@ async def gameflow_phase_changed(connection, event):
         game_state.reset()
         gui.game_status.set("Game Ended")
         gui.log_message("Game has ended")
+    gui.update_gui()
 
 
 @connector.ready
@@ -425,13 +456,14 @@ async def connect(connection):
     try:
         region_data = await connection.request('get', '/lol-platform-config/v1/namespaces')
         region_json = await region_data.json()
-        current_region = region_json.get('active', {}).get('region', 'euw').lower()  # Default to 'euw' if region is not found
+        current_region = region_json.get('active', {}).get('region',
+                                                           'euw').lower()  # Default to 'euw' if region is not found
         gui.log_message(f"Region detected: {current_region}")
         gui.region_label.config(text=f"Region: {current_region.upper()}")  # Update the region label in the GUI
     except Exception as e:
         gui.log_message(f"Error fetching region: {e}")
         current_region = "euw"  # Fallback to default region
-        gui.region_label.config(text=f"Region: {current_region.upper()}")  # Update the region label in the GUI
+        gui.region_label.config(text=f"Current: {current_region.upper()}")  # Update the region label in the GUI
 
     # Get the summoner ID and champion list
     summoner_id = summoner_data['summonerId']
@@ -455,6 +487,10 @@ async def connect(connection):
 
     # Start the update loops
     asyncio.create_task(update_lobby_info(connection))
+
+    # Update the GUI immediately after connection
+    gui.update_gui()
+
 
 async def update_lobby_info(connection):
     """Updates lobby info with reduced API calls."""
@@ -609,7 +645,6 @@ async def champ_select_changed(connection, event):
                 selected_ban = role_config["ban_var"].get()
                 if selected_ban != "None" and selected_ban in champions_map:
                     try:
-                        # Don't check for last_ban to ensure it always attempts to ban
                         await connection.request('patch',
                                                  f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
                                                  data={"championId": champions_map[selected_ban], "completed": True})
@@ -624,7 +659,6 @@ async def champ_select_changed(connection, event):
                 selected_pick = role_config["pick_var"].get()
                 if selected_pick != "None" and selected_pick in champions_map:
                     try:
-                        # Don't check for last_pick to ensure it always attempts to pick
                         await connection.request('patch',
                                                  f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
                                                  data={"championId": champions_map[selected_pick], "completed": True})
@@ -667,19 +701,34 @@ async def disconnect(_):
     if not client_closed:
         gui.log_message('The League client has been closed!')
         client_closed = True
+
+    # Explicitly close the WebSocket connection
+    if connector.connection:
+        await connector.connection.close()
+
     await connector.stop()
 
 
 # Function to start the LCU connector in a separate thread
 def start_connector():
-    global loop
+    global loop, stop_thread
+    stop_thread = False
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(connector.start())
+
+    try:
+        while not stop_thread:
+            loop.run_until_complete(connector.start())
+    except Exception as e:
+        gui.log_message(f"Error in connector thread: {e}")
+    finally:
+        loop.close()
+
 
 # Start the GUI
 root = tk.Tk()
 gui = LeagueGUI(root)  # Create the GUI object
+gui.update_gui()
 
 # Start the LCU connector in a separate thread
 connector_thread = threading.Thread(target=start_connector)
