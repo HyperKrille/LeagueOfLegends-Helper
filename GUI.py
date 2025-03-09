@@ -13,12 +13,13 @@ import os
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Global variables
-global champions_map, client_connected, client_closed, gui, connector, current_region
+global champions_map, client_connected, client_closed, gui, connector, current_region, client_closed
 champions_map = {}
 client_connected = False  # Tracks if the client is connected
 client_closed = False  # Tracks if the client has been closed
 connector = Connector()  # Initialize the connector globally
 current_region = "NONE"  # Default region, will be updated on startup
+client_closed = False
 
 class GameState:
     """Class to manage game-related states."""
@@ -439,14 +440,14 @@ class LeagueGUI:
             self.log_message(f"Error dodging: {e}")
 
     def quit_program(self):
-        """Handle program exit."""
-        global stop_thread, connector_thread
+        global stop_thread, connector_thread, client_closed
 
         # Save configuration before exiting
         self.save_configuration()
 
         # Signal the thread to stop
         stop_thread = True
+        client_closed = True  # Ensure the client closed flag is set
 
         # Stop the LCU connector
         if connector.connection:
@@ -767,29 +768,29 @@ async def champ_select_changed(connection, event):
 @connector.close
 async def disconnect(_):
     global client_connected, client_closed
-    client_connected = False  # Clear flag when disconnected
-    if not client_closed:
+    if not client_closed:  # Only run this logic once
+        client_connected = False  # Clear flag when disconnected
+        client_closed = True  # Set the flag to indicate the client is closed
         gui.log_message('The League client has been closed!')
-        client_closed = True
 
-    # Stop the connector
-    await connector.stop()
+        # Stop the connector
+        await connector.stop()
 
-    # Update the GUI to reflect the disconnected state
-    gui.game_status.set("Not Connected")
-    gui.summoner_name.set("Waiting for connection...")
-    gui.update_gui()
+        # Update the GUI to reflect the disconnected state
+        gui.game_status.set("Not Connected")
+        gui.summoner_name.set("Waiting for connection...")
+        gui.update_gui()
 
 
 # Function to start the LCU connector in a separate thread
 def start_connector():
-    global loop, stop_thread
+    global loop, stop_thread, client_closed
     stop_thread = False
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        while not stop_thread:
+        while not stop_thread and not client_closed:  # Stop if client is closed
             loop.run_until_complete(connector.start())
     except Exception as e:
         gui.log_message(f"Error in connector thread: {e}")
