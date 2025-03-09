@@ -53,7 +53,7 @@ class LeagueGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("League Client Status")
-        self.root.geometry("650x900")
+        self.root.geometry("550x1000")
 
         # Apply a modern theme
         style = ttk.Style()
@@ -177,12 +177,47 @@ class LeagueGUI:
 
         # Search bar for ban champions
         ttk.Label(auto_ban_frame, text="Search Ban:").pack(pady=2)
+        self.role_configs[role]["ban_search_var"] = tk.StringVar()
         ban_search_entry = ttk.Entry(auto_ban_frame, textvariable=self.role_configs[role]["ban_search_var"])
         ban_search_entry.pack(pady=2, fill="x")
 
-        auto_ban_dropdown = ttk.Combobox(auto_ban_frame, textvariable=self.role_configs[role]["ban_var"])
-        auto_ban_dropdown['values'] = ["None"] + list(champions_map.keys())
-        auto_ban_dropdown.pack(pady=5, fill="x")
+        # Listbox for ban suggestions
+        ban_suggestion_listbox = tk.Listbox(auto_ban_frame, height=5)
+        ban_suggestion_listbox.pack(pady=5, fill="x")
+
+        # Function to update ban suggestions
+        def update_ban_suggestions(event=None):
+            search_text = self.role_configs[role]["ban_search_var"].get().lower()
+            ban_suggestion_listbox.delete(0, tk.END)  # Clear the listbox
+
+            # Always add "None" as the first suggestion
+            ban_suggestion_listbox.insert(tk.END, "None")
+
+            if search_text:
+                # Filter champions based on search text
+                filtered_champs = [champ for champ in champions_map.keys() if search_text in champ.lower()]
+            else:
+                # If search bar is empty, show all champions in alphabetical order
+                filtered_champs = sorted(champions_map.keys())
+
+            # Populate the listbox with filtered champions
+            for champ in filtered_champs:
+                ban_suggestion_listbox.insert(tk.END, champ)
+
+        # Bind the search bar to update suggestions
+        ban_search_entry.bind("<KeyRelease>", update_ban_suggestions)
+
+        # Function to handle ban selection
+        def on_ban_select(event):
+            selected_indices = ban_suggestion_listbox.curselection()
+            if selected_indices:  # Check if an item is selected
+                selected_champ = ban_suggestion_listbox.get(selected_indices[0])
+                self.role_configs[role]["ban_var"].set(selected_champ)
+                self.role_configs[role]["ban_search_var"].set(selected_champ)
+                ban_suggestion_listbox.delete(0, tk.END)
+
+        # Bind the listbox to handle selection
+        ban_suggestion_listbox.bind("<<ListboxSelect>>", on_ban_select)
 
         # Auto-Pick Section
         auto_pick_frame = ttk.LabelFrame(tab, text="Auto-Pick Champion")
@@ -190,25 +225,59 @@ class LeagueGUI:
 
         # Search bar for pick champions
         ttk.Label(auto_pick_frame, text="Search Pick:").pack(pady=2)
+        self.role_configs[role]["pick_search_var"] = tk.StringVar()
         pick_search_entry = ttk.Entry(auto_pick_frame, textvariable=self.role_configs[role]["pick_search_var"])
         pick_search_entry.pack(pady=2, fill="x")
 
-        auto_pick_dropdown = ttk.Combobox(auto_pick_frame, textvariable=self.role_configs[role]["pick_var"])
-        auto_pick_dropdown['values'] = ["None"] + list(champions_map.keys())
-        auto_pick_dropdown.pack(pady=5, fill="x")
+        # Listbox for pick suggestions
+        pick_suggestion_listbox = tk.Listbox(auto_pick_frame, height=5)
+        pick_suggestion_listbox.pack(pady=5, fill="x")
 
-        # Store references to the dropdowns
-        self.role_configs[role]["ban_dropdown"] = auto_ban_dropdown
-        self.role_configs[role]["pick_dropdown"] = auto_pick_dropdown
+        # Function to update pick suggestions
+        def update_pick_suggestions(event=None):
+            search_text = self.role_configs[role]["pick_search_var"].get().lower()
+            pick_suggestion_listbox.delete(0, tk.END)  # Clear the listbox
 
-        # Bind search boxes to filter functions
-        ban_search_entry.bind('<KeyRelease>', lambda event, r=role: self.filter_dropdown(r, "ban"))
-        pick_search_entry.bind('<KeyRelease>', lambda event, r=role: self.filter_dropdown(r, "pick"))
+            # Always add "None" as the first suggestion
+            pick_suggestion_listbox.insert(tk.END, "None")
 
-        # Bind dropdowns to save config when changed
-        auto_ban_dropdown.bind("<<ComboboxSelected>>", lambda event: self.save_configuration())
-        auto_pick_dropdown.bind("<<ComboboxSelected>>", lambda event: self.save_configuration())
+            if search_text:
+                # Filter champions based on search text
+                filtered_champs = [champ for champ in champions_map.keys() if search_text in champ.lower()]
+            else:
+                # If search bar is empty, show all champions in alphabetical order
+                filtered_champs = sorted(champions_map.keys())
 
+            # Populate the listbox with filtered champions
+            for champ in filtered_champs:
+                pick_suggestion_listbox.insert(tk.END, champ)
+
+        # Bind the search bar to update suggestions
+        pick_search_entry.bind("<KeyRelease>", update_pick_suggestions)
+
+        # Function to handle pick selection
+        def on_pick_select(event):
+            selected_indices = pick_suggestion_listbox.curselection()
+            if selected_indices:  # Check if an item is selected
+                selected_champ = pick_suggestion_listbox.get(selected_indices[0])
+                self.role_configs[role]["pick_var"].set(selected_champ)
+                self.role_configs[role]["pick_search_var"].set(selected_champ)
+                pick_suggestion_listbox.delete(0, tk.END)
+
+        # Bind the listbox to handle selection
+        pick_suggestion_listbox.bind("<<ListboxSelect>>", on_pick_select)
+
+        # Function to handle pick selection
+        def on_pick_select(event):
+            selected_indices = pick_suggestion_listbox.curselection()
+            if selected_indices:  # Check if an item is selected
+                selected_champ = pick_suggestion_listbox.get(selected_indices[0])
+                self.role_configs[role]["pick_var"].set(selected_champ)
+                self.role_configs[role]["pick_search_var"].set(selected_champ)
+                pick_suggestion_listbox.delete(0, tk.END)
+
+        # Bind the listbox to handle selection
+        pick_suggestion_listbox.bind("<<ListboxSelect>>", on_pick_select)
     def filter_dropdown(self, role, dropdown_type):
         """Filter the champion dropdowns based on search text."""
         if dropdown_type == "ban":
@@ -298,26 +367,18 @@ class LeagueGUI:
     def update_champion_dropdowns(self):
         """Update all champion dropdowns with the current champion list."""
         for role in self.roles:
-            ban_dropdown = self.role_configs[role]["ban_dropdown"]
-            pick_dropdown = self.role_configs[role]["pick_dropdown"]
-
             # Preserve current selections
             current_ban = self.role_configs[role]["ban_var"].get()
             current_pick = self.role_configs[role]["pick_var"].get()
 
-            # Update the dropdown values
-            ban_dropdown['values'] = ["None"] + list(champions_map.keys())
-            pick_dropdown['values'] = ["None"] + list(champions_map.keys())
+            # Update the ban and pick search variables
+            self.role_configs[role]["ban_search_var"].set(current_ban)
+            self.role_configs[role]["pick_search_var"].set(current_pick)
 
-            # Restore selections if they still exist in the new champion list
-            if current_ban in champions_map or current_ban == "None":
-                self.role_configs[role]["ban_var"].set(current_ban)
-            else:
+            # If the current selections are not in the champions map, reset them to "None"
+            if current_ban not in champions_map and current_ban != "None":
                 self.role_configs[role]["ban_var"].set("None")
-
-            if current_pick in champions_map or current_pick == "None":
-                self.role_configs[role]["pick_var"].set(current_pick)
-            else:
+            if current_pick not in champions_map and current_pick != "None":
                 self.role_configs[role]["pick_var"].set("None")
 
     def open_opgg(self):
@@ -379,7 +440,8 @@ class LeagueGUI:
 
     def quit_program(self):
         """Handle program exit."""
-        global stop_thread
+        global stop_thread, connector_thread
+
         # Save configuration before exiting
         self.save_configuration()
 
@@ -387,13 +449,21 @@ class LeagueGUI:
         stop_thread = True
 
         # Stop the LCU connector
-        asyncio.run_coroutine_threadsafe(connector.stop(), loop)
+        if connector.connection:
+            try:
+                # Stop the connector in a thread-safe manner
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(connector.stop(), loop).result(timeout=2)
+            except Exception as e:
+                self.log_message(f"Error stopping connector: {e}")
 
         # Stop the event loop
-        loop.call_soon_threadsafe(loop.stop)
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
 
         # Wait for the connector thread to finish
-        connector_thread.join(timeout=2)  # Wait up to 2 seconds for the thread to exit
+        if connector_thread.is_alive():
+            connector_thread.join(timeout=2)  # Wait up to 2 seconds for the thread to exit
 
         # Close the GUI
         self.root.destroy()
@@ -702,11 +772,13 @@ async def disconnect(_):
         gui.log_message('The League client has been closed!')
         client_closed = True
 
-    # Explicitly close the WebSocket connection
-    if connector.connection:
-        await connector.connection.close()
-
+    # Stop the connector
     await connector.stop()
+
+    # Update the GUI to reflect the disconnected state
+    gui.game_status.set("Not Connected")
+    gui.summoner_name.set("Waiting for connection...")
+    gui.update_gui()
 
 
 # Function to start the LCU connector in a separate thread
@@ -722,6 +794,9 @@ def start_connector():
     except Exception as e:
         gui.log_message(f"Error in connector thread: {e}")
     finally:
+        # Clean up the event loop
+        if loop.is_running():
+            loop.stop()
         loop.close()
 
 
