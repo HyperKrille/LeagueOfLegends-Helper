@@ -35,7 +35,7 @@ This project is a Python-based GUI tool designed to enhance your League of Legen
 1. Clone the Repository:
 
 ```bash
-git clone https://github.com/your-username/LeagueOfLegends-Helper.git
+git clone https://github.com/HyperKrille/LeagueOfLegends-Helper
 cd LeagueOfLegends-Helper
 ```
 2. Install Dependencies:
