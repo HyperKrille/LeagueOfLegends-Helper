@@ -414,27 +414,23 @@ class LeagueGUI:
             self.log_message(f"Error dodging: {e}")
 
     async def _dodge_game_async(self):
-        """Asynchronous logic to leave the lobby or champion select."""
         try:
-            # Retrieve the connection from the connector
             connection = connector.connection
             if connection is None:
                 self.log_message("Error: No active connection to the League client.")
                 return
 
-            # Check if we're in a lobby
-            response = await connection.request('get', '/lol-lobby/v2/lobby')
-            if response.status != 200:
-                self.log_message("You are NOT in a lobby.")
+            if game_state.current_lobby_state not in ["LOBBY", "CHAMP_SELECT"]:
+                self.log_message("You are not in a lobby or champion select.")
                 return
 
-            # Send a request to leave the lobby or champion select
+            # Attempt to leave the lobby/champion select
             response = await connection.request('delete', '/lol-lobby/v2/lobby')
 
-            if response.status == 204:
+            if response.status == 204 or response.status == 200:
                 self.log_message("Successfully left the lobby/champion select.")
             else:
-                self.log_message(f"Unexpected response: {response.status}")
+                self.log_message(f"Unexpected response: {response.status} - {await response.text()}")
 
         except Exception as e:
             self.log_message(f"Error dodging: {e}")
@@ -502,6 +498,14 @@ async def gameflow_phase_changed(connection, event):
         game_state.current_lobby_state = "IN_GAME"
         gui.game_status.set("In Game")
         gui.log_message("Game detected - now in active game")
+        try:
+            with open("music.txt", "r") as f:
+                music_url = f.readline().strip()
+                if music_url:
+                    webbrowser.open(music_url, new=0, autoraise=True)
+                    gui.log_message("Playing music")
+        except Exception as e:
+            gui.log_message(f"Error opening music: {e}")
     elif new_phase == "WaitingForStats":
         game_state.in_game = False
         game_state.reset()
