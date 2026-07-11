@@ -1,6 +1,7 @@
 # League of Legends Helper
 
 ![League of Legends Helper GUI](images/GUI_screenshot.png)
+
 *Script to auto-accept, auto-pick, and auto-ban in League of Legends.*
 
 ---
