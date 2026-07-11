@@ -16,6 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 global champions_map, client_connected, client_closed, gui, connector, current_region, client_closed
 champions_map = {}
 client_connected = False  # Tracks if the client is connected
+lobby_info_task = None  # Handle to the background lobby-info polling task
 client_closed = False  # Tracks if the client has been closed
 connector = Connector()  # Initialize the connector globally
 current_region = "NONE"  # Default region, will be updated on startup
@@ -51,14 +52,33 @@ game_state = GameState()
 
 
 class LeagueGUI:
+    # Color palette (dark theme, League-ish blue/gold accents)
+    COLORS = {
+        "bg": "#1e2328",
+        "bg_alt": "#232a31",
+        "panel": "#282f36",
+        "border": "#3c4148",
+        "text": "#f0e6d2",
+        "text_dim": "#a09b8c",
+        "accent": "#c8aa6e",
+        "accent_dim": "#785a28",
+        "good": "#4caf50",
+        "bad": "#e05252",
+        "warn": "#e0a952",
+        "info": "#5bc0de",
+    }
+
     def __init__(self, root):
         self.root = root
         self.root.title("League Client Status")
-        self.root.geometry("550x1000")
+        self.root.geometry("600x820")
+        self.root.minsize(420, 400)
+        self.root.configure(bg=self.COLORS["bg"])
 
-        # Apply a modern theme
+        # Apply a modern dark theme
         style = ttk.Style()
         style.theme_use("clam")
+        self._configure_style(style)
 
         # Define roles
         self.roles = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
@@ -70,6 +90,11 @@ class LeagueGUI:
             "UTILITY": "Support"
         }
 
+        # Key used for game modes that don't assign a lane role (Arena, ARAM, URF, etc.)
+        self.fallback_role_key = "ANY"
+        # All keys whose settings get saved/loaded/refreshed together
+        self.all_config_keys = self.roles + [self.fallback_role_key]
+
         # Variables
         self.summoner_name = tk.StringVar(value="Waiting for connection...")
         self.game_status = tk.StringVar(value="Not Connected")
@@ -77,7 +102,7 @@ class LeagueGUI:
         self.selected_roles = tk.StringVar(value="Roles: N/A")
         self.auto_accept_var = tk.BooleanVar(value=False)
 
-        # Role-specific variables
+        # Role-specific variables (lane roles + the "ANY" fallback for roleless modes)
         self.role_configs = {
             role: {
                 "ban_var": tk.StringVar(value="None"),
@@ -85,44 +110,90 @@ class LeagueGUI:
                 "ban_search_var": tk.StringVar(),
                 "pick_search_var": tk.StringVar()
             }
-            for role in self.roles
+            for role in self.all_config_keys
         }
 
+        # --- Scrollable container -------------------------------------------------
+        # Wraps all content in a canvas+scrollbar so nothing (like the button row)
+        # can ever be pushed off-screen by DPI scaling or a small window/screen.
+        outer = ttk.Frame(root)
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(outer, bg=self.COLORS["bg"], highlightthickness=0)
+        v_scroll = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=v_scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        v_scroll.pack(side="right", fill="y")
+
+        content = ttk.Frame(canvas)
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _on_content_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            # Make the inner frame track the canvas width so children can fill="x" properly
+            canvas.itemconfig(content_window, width=event.width)
+
+        content.bind("<Configure>", _on_content_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_wheel(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_wheel(event):
+            canvas.unbind_all("<MouseWheel>")
+
+        canvas.bind("<Enter>", _bind_wheel)
+        canvas.bind("<Leave>", _unbind_wheel)
+
+        root = content  # Everything below is parented to the scrollable content frame
+
+        # Title bar with connection indicator
+        title_bar = ttk.Frame(root)
+        title_bar.pack(fill="x", padx=10, pady=(10, 0))
+        ttk.Label(title_bar, text="League Client Status", style="Header.TLabel").pack(side="left")
+
+        self.conn_dot = tk.Canvas(title_bar, width=14, height=14, bg=self.COLORS["bg"],
+                                   highlightthickness=0)
+        self.conn_dot_id = self.conn_dot.create_oval(2, 2, 12, 12, fill=self.COLORS["bad"],
+                                                       outline="")
+        self.conn_dot.pack(side="right", padx=(0, 4))
+        self.conn_text = ttk.Label(title_bar, text="Disconnected", style="Dim.TLabel")
+        self.conn_text.pack(side="right", padx=(0, 6))
+
         # Top frame for summoner info and game status
-        info_frame = ttk.LabelFrame(root, text="Game Information", padding=10)
+        info_frame = ttk.LabelFrame(root, text="Game Information", padding=12)
         info_frame.pack(pady=10, padx=10, fill="x")
+        info_frame.columnconfigure(1, weight=1)
 
-        # Summoner Info
-        ttk.Label(info_frame, text="Summoner:", font=("Arial", 11, "bold")).grid(row=0, column=0, sticky="w", padx=5,
-                                                                                 pady=2)
-        self.summoner_label = ttk.Label(info_frame, textvariable=self.summoner_name, font=("Arial", 11))
-        self.summoner_label.grid(row=0, column=1, sticky="w", padx=5)
+        def info_row(r, label_text, textvariable=None, text=None):
+            ttk.Label(info_frame, text=label_text, style="Dim.TLabel").grid(
+                row=r, column=0, sticky="w", padx=5, pady=4)
+            if textvariable is not None:
+                lbl = ttk.Label(info_frame, textvariable=textvariable, style="Value.TLabel")
+            else:
+                lbl = ttk.Label(info_frame, text=text, style="Value.TLabel")
+            lbl.grid(row=r, column=1, sticky="w", padx=5, pady=4)
+            return lbl
 
-        # Game Status
-        ttk.Label(info_frame, text="Game Status:", font=("Arial", 10)).grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        self.status_label = ttk.Label(info_frame, textvariable=self.game_status, font=("Arial", 10, "bold"))
-        self.status_label.grid(row=1, column=1, sticky="w", padx=5)
+        self.summoner_label = info_row(0, "Summoner", self.summoner_name)
+        self.status_label = info_row(1, "Game Status", self.game_status)
+        self.roles_label = info_row(2, "Selected Roles", self.selected_roles)
+        self.phase_label = info_row(3, "Champion Select Phase", self.champ_select_phase)
+        self.region_label = info_row(4, "Region", text="N/A")
 
-        # Selected Roles
-        ttk.Label(info_frame, text="Selected Roles:", font=("Arial", 10)).grid(row=2, column=0, sticky="w", padx=5,
-                                                                               pady=2)
-        self.roles_label = ttk.Label(info_frame, textvariable=self.selected_roles, font=("Arial", 10))
-        self.roles_label.grid(row=2, column=1, sticky="w", padx=5)
-
-        # Champion Select Phase
-        ttk.Label(info_frame, text="Champion Select Phase:", font=("Arial", 10)).grid(row=3, column=0, sticky="w",
-                                                                                      padx=5, pady=2)
-        self.phase_label = ttk.Label(info_frame, textvariable=self.champ_select_phase, font=("Arial", 10))
-        self.phase_label.grid(row=3, column=1, sticky="w", padx=5)
-
-        # Region Label
-        ttk.Label(info_frame, text="Region:", font=("Arial", 10)).grid(row=4, column=0, sticky="w", padx=5, pady=2)
-        self.region_label = ttk.Label(info_frame, text="Region: N/A", font=("Arial", 10))
-        self.region_label.grid(row=4, column=1, sticky="w", padx=5)
+        ttk.Separator(info_frame, orient="horizontal").grid(row=5, column=0, columnspan=2,
+                                                              sticky="ew", pady=8)
 
         # Auto-Accept Checkbox
-        self.auto_accept_button = ttk.Checkbutton(info_frame, text="Auto-Accept Matches", variable=self.auto_accept_var)
-        self.auto_accept_button.grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        self.auto_accept_button = ttk.Checkbutton(info_frame, text="Auto-Accept Matches",
+                                                    variable=self.auto_accept_var,
+                                                    command=self.save_configuration)
+        self.auto_accept_button.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
         # Notebook (Tabbed View for Roles)
         self.notebook = ttk.Notebook(root)
@@ -136,33 +207,60 @@ class LeagueGUI:
             self.notebook.add(tab, text=self.role_labels[role])
             self.setup_role_tab(role, tab)
 
+        # Extra tab for game modes with no assigned lane role (Arena, ARAM, URF, etc.)
+        fallback_tab = ttk.Frame(self.notebook, padding=10)
+        self.role_tabs[self.fallback_role_key] = fallback_tab
+        self.notebook.add(fallback_tab, text="Other Modes")
+        self.setup_role_tab(self.fallback_role_key, fallback_tab)
+
         # Status Log Frame
-        log_frame = ttk.LabelFrame(root, text="Status Log", padding=10)
+        c = self.COLORS
+        log_frame = ttk.LabelFrame(root, text="Status Log", padding=8)
         log_frame.pack(pady=10, padx=10, fill="both", expand=True)
 
-        self.log_text = tk.Text(log_frame, height=10, width=60, wrap="word", font=("Arial", 10))
-        self.log_text.pack(pady=5, padx=5, fill="both", expand=True)
+        log_inner = ttk.Frame(log_frame)
+        log_inner.pack(fill="both", expand=True)
+
+        log_scrollbar = ttk.Scrollbar(log_inner, orient="vertical")
+        self.log_text = tk.Text(
+            log_inner, height=10, width=60, wrap="word", font=("Consolas", 9),
+            bg=c["panel"], fg=c["text"], insertbackground=c["text"],
+            relief="flat", borderwidth=0, yscrollcommand=log_scrollbar.set,
+        )
+        log_scrollbar.config(command=self.log_text.yview)
+        self.log_text.pack(side="left", pady=5, padx=(5, 0), fill="both", expand=True)
+        log_scrollbar.pack(side="right", fill="y", pady=5)
+
+        # Color tags for different message severities
+        self.log_text.tag_config("error", foreground=c["bad"])
+        self.log_text.tag_config("warn", foreground=c["warn"])
+        self.log_text.tag_config("info", foreground=c["info"])
+        self.log_text.tag_config("timestamp", foreground=c["text_dim"])
+        self.log_text.config(state="disabled")
+
+        ttk.Button(log_frame, text="Clear Log", command=self.clear_log).pack(
+            anchor="e", pady=(4, 0))
 
         # Bottom frame for buttons
         button_frame = ttk.Frame(root)
         button_frame.pack(pady=10, padx=10, fill="x")
 
-        # Dodge Button
-        self.dodge_button = ttk.Button(button_frame, text="Dodge Game", command=self.dodge_game, state=tk.DISABLED)
-        self.dodge_button.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
-
         # Open op.gg Button
         self.opgg_button = ttk.Button(button_frame, text="Open op.gg", command=self.open_opgg)
-        self.opgg_button.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.opgg_button.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        # Save Settings Button
+        self.save_button = ttk.Button(button_frame, text="Save Settings", command=self.save_configuration,
+                                       style="Accent.TButton")
+        self.save_button.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
         # Quit Button
-        self.quit_button = ttk.Button(button_frame, text="Quit", command=self.quit_program, style="TButton")
+        self.quit_button = ttk.Button(button_frame, text="Quit", command=self.quit_program)
         self.quit_button.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
 
         # Configure column weights to make buttons expand evenly
-        button_frame.columnconfigure(0, weight=1)
-        button_frame.columnconfigure(1, weight=1)
-        button_frame.columnconfigure(2, weight=1)
+        for col in range(3):
+            button_frame.columnconfigure(col, weight=1)
 
         # Load configuration
         self.load_configuration()
@@ -170,139 +268,165 @@ class LeagueGUI:
         # Start the GUI update loop
         self.update_gui()
 
+    def _configure_style(self, style):
+        """Configure ttk widget styles for a cohesive dark theme."""
+        c = self.COLORS
+        self.root.option_add("*Font", "{Segoe UI} 10")
+
+        style.configure(".", background=c["bg"], foreground=c["text"], font=("Segoe UI", 10))
+        style.configure("TFrame", background=c["bg"])
+        style.configure("TLabel", background=c["bg"], foreground=c["text"])
+        style.configure("Dim.TLabel", background=c["bg"], foreground=c["text_dim"])
+        style.configure("Header.TLabel", background=c["bg"], foreground=c["accent"],
+                         font=("Segoe UI", 16, "bold"))
+        style.configure("Value.TLabel", background=c["bg"], foreground=c["text"],
+                         font=("Segoe UI", 10, "bold"))
+        style.configure("Current.TLabel", background=c["panel"], foreground=c["accent"],
+                         font=("Segoe UI", 10, "bold"))
+
+        style.configure("TLabelframe", background=c["bg"], bordercolor=c["border"],
+                         relief="solid")
+        style.configure("TLabelframe.Label", background=c["bg"], foreground=c["accent"],
+                         font=("Segoe UI", 10, "bold"))
+
+        style.configure("TButton", background=c["panel"], foreground=c["text"],
+                         bordercolor=c["border"], focusthickness=1, padding=6)
+        style.map("TButton", background=[("active", c["accent_dim"]), ("disabled", c["bg_alt"])],
+                  foreground=[("disabled", c["text_dim"])])
+
+        style.configure("Accent.TButton", background=c["accent_dim"], foreground=c["text"])
+        style.map("Accent.TButton", background=[("active", c["accent"])])
+
+        style.configure("TCheckbutton", background=c["bg"], foreground=c["text"])
+        style.map("TCheckbutton", background=[("active", c["bg"])])
+
+        style.configure("TEntry", fieldbackground=c["panel"], foreground=c["text"],
+                         bordercolor=c["border"], insertcolor=c["text"])
+
+        style.configure("TNotebook", background=c["bg"], bordercolor=c["border"])
+        style.configure("TNotebook.Tab", background=c["bg_alt"], foreground=c["text_dim"],
+                         padding=(12, 6))
+        style.map("TNotebook.Tab", background=[("selected", c["panel"])],
+                  foreground=[("selected", c["accent"])])
+
+    def _build_champ_picker(self, tab, role, kind, label_text):
+        """Build a search + listbox champion picker for either 'ban' or 'pick'."""
+        c = self.COLORS
+        var_key = f"{kind}_var"
+        search_key = f"{kind}_search_var"
+
+        frame = ttk.LabelFrame(tab, text=label_text, padding=8)
+        frame.pack(pady=8, padx=10, fill="x")
+
+        # Currently selected champion, shown prominently
+        current_row = ttk.Frame(frame)
+        current_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(current_row, text="Current:", style="Dim.TLabel").pack(side="left")
+        current_label = ttk.Label(current_row, textvariable=self.role_configs[role][var_key],
+                                   style="Current.TLabel")
+        current_label.pack(side="left", padx=6)
+        ttk.Button(current_row, text="Clear", width=6,
+                   command=lambda: self._clear_selection(role, kind)).pack(side="right")
+
+        # Search entry
+        self.role_configs[role][search_key] = tk.StringVar()
+        search_entry = ttk.Entry(frame, textvariable=self.role_configs[role][search_key])
+        search_entry.pack(pady=2, fill="x")
+        search_entry.insert(0, "")
+
+        # Listbox + scrollbar for suggestions
+        list_row = ttk.Frame(frame)
+        list_row.pack(pady=4, fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(list_row, orient="vertical")
+        suggestion_listbox = tk.Listbox(
+            list_row, height=6, yscrollcommand=scrollbar.set,
+            bg=c["panel"], fg=c["text"], selectbackground=c["accent_dim"],
+            selectforeground=c["text"], highlightbackground=c["border"],
+            highlightcolor=c["accent"], relief="flat", borderwidth=0,
+        )
+        scrollbar.config(command=suggestion_listbox.yview)
+        suggestion_listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def update_suggestions(event=None):
+            search_text = self.role_configs[role][search_key].get().lower()
+            suggestion_listbox.delete(0, tk.END)
+            suggestion_listbox.insert(tk.END, "None")
+
+            if search_text:
+                filtered_champs = sorted(
+                    champ for champ in champions_map.keys() if search_text in champ.lower())
+            else:
+                filtered_champs = sorted(champions_map.keys())
+
+            for champ in filtered_champs:
+                suggestion_listbox.insert(tk.END, champ)
+
+        def on_select(event):
+            selected_indices = suggestion_listbox.curselection()
+            if selected_indices:
+                selected_champ = suggestion_listbox.get(selected_indices[0])
+                self.role_configs[role][var_key].set(selected_champ)
+                self.role_configs[role][search_key].set("")
+                update_suggestions()
+                self.save_configuration()
+
+        search_entry.bind("<KeyRelease>", update_suggestions)
+        suggestion_listbox.bind("<<ListboxSelect>>", on_select)
+        update_suggestions()
+
+    def _clear_selection(self, role, kind):
+        """Reset a role's ban/pick selection back to 'None'."""
+        self.role_configs[role][f"{kind}_var"].set("None")
+        self.save_configuration()
+
     def setup_role_tab(self, role, tab):
         """Set up the widgets for a role tab."""
-        # Auto-Ban Section
-        auto_ban_frame = ttk.LabelFrame(tab, text="Auto-Ban Champion")
-        auto_ban_frame.pack(pady=10, padx=10, fill="x")
-
-        # Search bar for ban champions
-        ttk.Label(auto_ban_frame, text="Search Ban:").pack(pady=2)
-        self.role_configs[role]["ban_search_var"] = tk.StringVar()
-        ban_search_entry = ttk.Entry(auto_ban_frame, textvariable=self.role_configs[role]["ban_search_var"])
-        ban_search_entry.pack(pady=2, fill="x")
-
-        # Listbox for ban suggestions
-        ban_suggestion_listbox = tk.Listbox(auto_ban_frame, height=5)
-        ban_suggestion_listbox.pack(pady=5, fill="x")
-
-        # Function to update ban suggestions
-        def update_ban_suggestions(event=None):
-            search_text = self.role_configs[role]["ban_search_var"].get().lower()
-            ban_suggestion_listbox.delete(0, tk.END)  # Clear the listbox
-
-            # Always add "None" as the first suggestion
-            ban_suggestion_listbox.insert(tk.END, "None")
-
-            if search_text:
-                # Filter champions based on search text
-                filtered_champs = [champ for champ in champions_map.keys() if search_text in champ.lower()]
-            else:
-                # If search bar is empty, show all champions in alphabetical order
-                filtered_champs = sorted(champions_map.keys())
-
-            # Populate the listbox with filtered champions
-            for champ in filtered_champs:
-                ban_suggestion_listbox.insert(tk.END, champ)
-
-        # Bind the search bar to update suggestions
-        ban_search_entry.bind("<KeyRelease>", update_ban_suggestions)
-
-        # Function to handle ban selection
-        def on_ban_select(event):
-            selected_indices = ban_suggestion_listbox.curselection()
-            if selected_indices:  # Check if an item is selected
-                selected_champ = ban_suggestion_listbox.get(selected_indices[0])
-                self.role_configs[role]["ban_var"].set(selected_champ)
-                self.role_configs[role]["ban_search_var"].set(selected_champ)
-                ban_suggestion_listbox.delete(0, tk.END)
-
-        # Bind the listbox to handle selection
-        ban_suggestion_listbox.bind("<<ListboxSelect>>", on_ban_select)
-
-        # Auto-Pick Section
-        auto_pick_frame = ttk.LabelFrame(tab, text="Auto-Pick Champion")
-        auto_pick_frame.pack(pady=10, padx=10, fill="x")
-
-        # Search bar for pick champions
-        ttk.Label(auto_pick_frame, text="Search Pick:").pack(pady=2)
-        self.role_configs[role]["pick_search_var"] = tk.StringVar()
-        pick_search_entry = ttk.Entry(auto_pick_frame, textvariable=self.role_configs[role]["pick_search_var"])
-        pick_search_entry.pack(pady=2, fill="x")
-
-        # Listbox for pick suggestions
-        pick_suggestion_listbox = tk.Listbox(auto_pick_frame, height=5)
-        pick_suggestion_listbox.pack(pady=5, fill="x")
-
-        # Function to update pick suggestions
-        def update_pick_suggestions(event=None):
-            search_text = self.role_configs[role]["pick_search_var"].get().lower()
-            pick_suggestion_listbox.delete(0, tk.END)  # Clear the listbox
-
-            # Always add "None" as the first suggestion
-            pick_suggestion_listbox.insert(tk.END, "None")
-
-            if search_text:
-                # Filter champions based on search text
-                filtered_champs = [champ for champ in champions_map.keys() if search_text in champ.lower()]
-            else:
-                # If search bar is empty, show all champions in alphabetical order
-                filtered_champs = sorted(champions_map.keys())
-
-            # Populate the listbox with filtered champions
-            for champ in filtered_champs:
-                pick_suggestion_listbox.insert(tk.END, champ)
-
-        # Bind the search bar to update suggestions
-        pick_search_entry.bind("<KeyRelease>", update_pick_suggestions)
-
-        # Function to handle pick selection
-        def on_pick_select(event):
-            selected_indices = pick_suggestion_listbox.curselection()
-            if selected_indices:  # Check if an item is selected
-                selected_champ = pick_suggestion_listbox.get(selected_indices[0])
-                self.role_configs[role]["pick_var"].set(selected_champ)
-                self.role_configs[role]["pick_search_var"].set(selected_champ)
-                pick_suggestion_listbox.delete(0, tk.END)
-
-        # Bind the listbox to handle selection
-        pick_suggestion_listbox.bind("<<ListboxSelect>>", on_pick_select)
-
-        # Function to handle pick selection
-        def on_pick_select(event):
-            selected_indices = pick_suggestion_listbox.curselection()
-            if selected_indices:  # Check if an item is selected
-                selected_champ = pick_suggestion_listbox.get(selected_indices[0])
-                self.role_configs[role]["pick_var"].set(selected_champ)
-                self.role_configs[role]["pick_search_var"].set(selected_champ)
-                pick_suggestion_listbox.delete(0, tk.END)
-
-        # Bind the listbox to handle selection
-        pick_suggestion_listbox.bind("<<ListboxSelect>>", on_pick_select)
-    def filter_dropdown(self, role, dropdown_type):
-        """Filter the champion dropdowns based on search text."""
-        if dropdown_type == "ban":
-            search_text = self.role_configs[role]["ban_search_var"].get().lower()
-            dropdown = self.role_configs[role]["ban_dropdown"]
-        else:  # pick
-            search_text = self.role_configs[role]["pick_search_var"].get().lower()
-            dropdown = self.role_configs[role]["pick_dropdown"]
-
-        # Filter champions based on search text
-        filtered_champs = [champ for champ in champions_map.keys() if search_text in champ.lower()]
-        dropdown['values'] = ["None"] + filtered_champs
+        if role == self.fallback_role_key:
+            ttk.Label(
+                tab,
+                text="Used for Arena, ARAM, URF, and any other mode without a lane role.",
+                style="Dim.TLabel", wraplength=480, justify="left",
+            ).pack(fill="x", pady=(0, 6))
+        self._build_champ_picker(tab, role, "ban", "Auto-Ban Champion")
+        self._build_champ_picker(tab, role, "pick", "Auto-Pick Champion")
 
     def log_message(self, message):
-        """Add a message to the log with timestamp."""
+        """Add a message to the log with timestamp, colored by severity."""
         timestamp = time.strftime("%H:%M:%S", time.localtime())
-        self.log_text.insert(tk.END, f"[{timestamp}] {message}\n")
+
+        lowered = message.lower()
+        if "error" in lowered or "failed" in lowered:
+            tag = "error"
+        elif "warn" in lowered or "no active connection" in lowered:
+            tag = "warn"
+        else:
+            tag = "info"
+
+        self.log_text.config(state="normal")
+        self.log_text.insert(tk.END, f"[{timestamp}] ", "timestamp")
+        self.log_text.insert(tk.END, f"{message}\n", tag)
 
         # Limit the number of log lines to 1000
-        log_lines = self.log_text.get("1.0", tk.END).splitlines()
-        if len(log_lines) > 1000:
-            self.log_text.delete("1.0", f"{len(log_lines) - 1000}.0")
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > 1000:
+            self.log_text.delete("1.0", f"{line_count - 1000}.0")
 
         self.log_text.see(tk.END)  # Auto-scroll to the end
+        self.log_text.config(state="disabled")
+
+    def clear_log(self):
+        """Clear all messages from the status log."""
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.config(state="disabled")
+
+    def set_connection_state(self, connected):
+        """Update the connection indicator dot and label."""
+        color = self.COLORS["good"] if connected else self.COLORS["bad"]
+        self.conn_dot.itemconfig(self.conn_dot_id, fill=color)
+        self.conn_text.config(text="Connected" if connected else "Disconnected")
 
     def load_configuration(self):
         """Load role-specific configuration from file."""
@@ -311,8 +435,8 @@ class LeagueGUI:
                 with open("role_config.json", "r") as file:
                     config = json.load(file)
 
-                    # Load role configurations
-                    for role in self.roles:
+                    # Load role configurations (lane roles + the roleless "ANY" fallback)
+                    for role in self.all_config_keys:
                         if role in config:
                             if "ban" in config[role]:
                                 self.role_configs[role]["ban_var"].set(config[role]["ban"])
@@ -334,8 +458,8 @@ class LeagueGUI:
         try:
             config = {"auto_accept": self.auto_accept_var.get()}
 
-            # Save role configurations
-            for role in self.roles:
+            # Save role configurations (lane roles + the roleless "ANY" fallback)
+            for role in self.all_config_keys:
                 config[role] = {
                     "ban": self.role_configs[role]["ban_var"].get(),
                     "pick": self.role_configs[role]["pick_var"].get()
@@ -350,12 +474,6 @@ class LeagueGUI:
 
     def update_gui(self):
         """Update the GUI periodically."""
-        # Enable/Disable Dodge Game button based on game state
-        if game_state.current_lobby_state in ["LOBBY", "CHAMP_SELECT"]:
-            self.dodge_button.config(state=tk.NORMAL)
-        else:
-            self.dodge_button.config(state=tk.DISABLED)
-
         # Enable/Disable Open op.gg button based on summoner name
         if self.summoner_name.get() != "Waiting for connection...":
             self.opgg_button.config(state=tk.NORMAL)
@@ -367,7 +485,7 @@ class LeagueGUI:
 
     def update_champion_dropdowns(self):
         """Update all champion dropdowns with the current champion list."""
-        for role in self.roles:
+        for role in self.all_config_keys:
             # Preserve current selections
             current_ban = self.role_configs[role]["ban_var"].get()
             current_pick = self.role_configs[role]["pick_var"].get()
@@ -395,48 +513,8 @@ class LeagueGUI:
         else:
             self.log_message("Failed to open op.gg: Summoner name or region not available.")
 
-    def dodge_game(self):
-        """Schedule the async dodge function in the correct event loop."""
-        try:
-            if game_state.current_lobby_state not in ["LOBBY", "CHAMP_SELECT"]:
-                self.log_message("You are not in a lobby or champion select.")
-                return
-
-            self.log_message("Attempting to leave the lobby/champion select...")
-
-            # Ensure the coroutine runs in the same loop as the LCU connector
-            loop = asyncio.get_event_loop()
-
-            # Schedule the async dodge function properly
-            loop.create_task(self._dodge_game_async())
-
-        except Exception as e:
-            self.log_message(f"Error dodging: {e}")
-
-    async def _dodge_game_async(self):
-        try:
-            connection = connector.connection
-            if connection is None:
-                self.log_message("Error: No active connection to the League client.")
-                return
-
-            if game_state.current_lobby_state not in ["LOBBY", "CHAMP_SELECT"]:
-                self.log_message("You are not in a lobby or champion select.")
-                return
-
-            # Attempt to leave the lobby/champion select
-            response = await connection.request('delete', '/lol-lobby/v2/lobby')
-
-            if response.status == 204 or response.status == 200:
-                self.log_message("Successfully left the lobby/champion select.")
-            else:
-                self.log_message(f"Unexpected response: {response.status} - {await response.text()}")
-
-        except Exception as e:
-            self.log_message(f"Error dodging: {e}")
-
     def quit_program(self):
-        global stop_thread, connector_thread, client_closed
+        global stop_thread, connector_thread, client_closed, client_connected
 
         # Save configuration before exiting
         self.save_configuration()
@@ -444,6 +522,23 @@ class LeagueGUI:
         # Signal the thread to stop
         stop_thread = True
         client_closed = True  # Ensure the client closed flag is set
+        client_connected = False  # Let the background polling loop's while-condition exit cleanly
+
+        # Cancel the background lobby-info polling task so it doesn't get
+        # destroyed mid-sleep when the loop stops (avoids "Task was destroyed
+        # but it is pending!" warnings on exit).
+        if loop.is_running() and lobby_info_task is not None and not lobby_info_task.done():
+            try:
+                async def _cancel_task():
+                    lobby_info_task.cancel()
+                    try:
+                        await lobby_info_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                asyncio.run_coroutine_threadsafe(_cancel_task(), loop).result(timeout=2)
+            except Exception as e:
+                self.log_message(f"Error cancelling background task: {e}")
 
         # Stop the LCU connector
         if connector.connection:
@@ -516,8 +611,9 @@ async def gameflow_phase_changed(connection, event):
 
 @connector.ready
 async def connect(connection):
-    global client_connected, gui, champions_map, current_region
+    global client_connected, gui, champions_map, current_region, lobby_info_task
     client_connected = True  # Set flag when connected
+    gui.set_connection_state(True)
     gui.game_status.set("Connected to League Client")
     gui.log_message("Connected to League Client")
 
@@ -534,11 +630,11 @@ async def connect(connection):
         current_region = region_json.get('active', {}).get('region',
                                                            'euw').lower()  # Default to 'euw' if region is not found
         gui.log_message(f"Region detected: {current_region}")
-        gui.region_label.config(text=f"Region: {current_region.upper()}")  # Update the region label in the GUI
+        gui.region_label.config(text=current_region.upper())  # Update the region label in the GUI
     except Exception as e:
         gui.log_message(f"Error fetching region: {e}")
         current_region = "euw"  # Fallback to default region
-        gui.region_label.config(text=f"Current: {current_region.upper()}")  # Update the region label in the GUI
+        gui.region_label.config(text=current_region.upper())  # Update the region label in the GUI
 
     # Get the summoner ID and champion list
     summoner_id = summoner_data['summonerId']
@@ -561,7 +657,7 @@ async def connect(connection):
     game_state.reset()
 
     # Start the update loops
-    asyncio.create_task(update_lobby_info(connection))
+    lobby_info_task = asyncio.create_task(update_lobby_info(connection))
 
     # Update the GUI immediately after connection
     gui.update_gui()
@@ -652,6 +748,15 @@ async def champ_select_changed(connection, event):
             gui.game_status.set(f"Champion Select - {lobby_phase}")
             gui.log_message(f"Champion select phase: {lobby_phase}")
 
+            # Best-effort game mode detection so it's clear when Arena/ARAM/URF etc. is active
+            try:
+                gameflow_resp = await connection.request('get', '/lol-gameflow/v1/session')
+                gameflow_json = await gameflow_resp.json()
+                mode = gameflow_json.get('gameData', {}).get('queue', {}).get('gameMode', 'Unknown')
+                gui.log_message(f"Game mode detected: {mode}")
+            except Exception:
+                pass  # Non-critical - just skip the mode announcement if unavailable
+
         # Only proceed if we have a valid localPlayerCellId
         if 'localPlayerCellId' in event.data and event.data['localPlayerCellId'] is not None:
             local_player_cell_id = event.data['localPlayerCellId']
@@ -672,13 +777,17 @@ async def champ_select_changed(connection, event):
                         game_state.current_assigned_position = assigned_position
                         gui.log_message(f"Assigned position: {assigned_position}")
 
-                        # If valid position, auto-select the corresponding tab
+                        # If valid position, auto-select the corresponding tab.
+                        # Otherwise (Arena, ARAM, URF, etc.) fall back to the "Other Modes" tab.
                         if assigned_position in gui.roles:
                             for i, role in enumerate(gui.roles):
                                 if role == assigned_position:
                                     gui.notebook.select(i)
                                     gui.log_message(f"Switched to {assigned_position} tab")
                                     break
+                        else:
+                            gui.notebook.select(len(gui.roles))
+                            gui.log_message("No lane role assigned - switched to 'Other Modes' tab")
 
             # Find our current action
             for action_group in event.data['actions']:
@@ -708,12 +817,15 @@ async def champ_select_changed(connection, event):
                         f"Using champion settings for assigned role: {game_state.current_assigned_position}")
                     champ_select_changed.last_role_config = game_state.current_assigned_position  # Track last used role config
             else:
-                # If no valid assigned position, log a warning but don't fall back to another role
+                # No lane role (Arena, ARAM, URF, and other roleless modes) - use the
+                # "Other Modes" tab settings instead of skipping auto-ban/pick entirely.
+                role_config = gui.role_configs.get(gui.fallback_role_key)
                 if not hasattr(champ_select_changed,
-                               'last_role_config') or champ_select_changed.last_role_config != 'UNKNOWN':
+                               'last_role_config') or champ_select_changed.last_role_config != gui.fallback_role_key:
                     gui.log_message(
-                        f"No valid assigned role detected. Assigned position: {game_state.current_assigned_position}")
-                    champ_select_changed.last_role_config = 'UNKNOWN'  # Track last used role config
+                        f"No lane role assigned ({game_state.current_assigned_position}) - "
+                        f"using 'Other Modes' champion settings")
+                    champ_select_changed.last_role_config = gui.fallback_role_key  # Track last used role config
 
             # Auto-ban logic
             if game_state.phase == 'ban' and lobby_phase == 'BAN_PICK' and game_state.am_i_banning and game_state.action_id is not None and role_config:
@@ -783,6 +895,7 @@ async def disconnect(_):
         # Update the GUI to reflect the disconnected state
         gui.game_status.set("Not Connected")
         gui.summoner_name.set("Waiting for connection...")
+        gui.set_connection_state(False)
         gui.update_gui()
 
 
