@@ -15,6 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Global variables
 global champions_map, client_connected, client_closed, gui, connector, current_region, client_closed
 champions_map = {}
+champions_id_to_name = {}  # Reverse lookup: champion id -> name, for showing teammate hovers
 client_connected = False  # Tracks if the client is connected
 lobby_info_task = None  # Handle to the background lobby-info polling task
 client_closed = False  # Tracks if the client has been closed
@@ -34,6 +35,7 @@ class GameState:
         self.action_id = None
         self.current_lobby_state = "NONE"
         self.current_assigned_position = "NONE"
+        self.teammate_champions = {}  # cellId -> last known championId (hover/pick tracking)
 
     def reset(self):
         """Reset all states to default values."""
@@ -45,6 +47,7 @@ class GameState:
         self.action_id = None
         self.current_lobby_state = "NONE"
         self.current_assigned_position = "NONE"
+        self.teammate_champions = {}
 
 
 # Create a global instance of GameState
@@ -581,6 +584,18 @@ async def gameflow_phase_changed(connection, event):
         game_state.current_lobby_state = "MATCHMAKING"
         gui.game_status.set("In Queue")
         gui.log_message("Searching for a match")
+
+        # Fetch and display the game mode/queue while searching, since the
+        # regular lobby-info poller only runs during the LOBBY state.
+        try:
+            lobby_info = await connection.request('get', '/lol-lobby/v2/lobby')
+            if lobby_info.status == 200:
+                lobby_info_json = await lobby_info.json()
+                game_mode = lobby_info_json.get('gameConfig', {}).get('gameMode', 'Unknown')
+                queue_id = lobby_info_json.get('gameConfig', {}).get('queueId', 0)
+                gui.game_status.set(f"In Queue - Mode: {game_mode} (Queue ID: {queue_id})")
+        except Exception as e:
+            gui.log_message(f"Could not fetch queue mode: {e}")
     elif new_phase == "ReadyCheck":
         gui.game_status.set("Ready Check")
         gui.log_message("Match ready check appeared")
@@ -593,14 +608,14 @@ async def gameflow_phase_changed(connection, event):
         game_state.current_lobby_state = "IN_GAME"
         gui.game_status.set("In Game")
         gui.log_message("Game detected - now in active game")
-        try:
-            with open("music.txt", "r") as f:
-                music_url = f.readline().strip()
-                if music_url:
-                    webbrowser.open(music_url, new=0, autoraise=True)
-                    gui.log_message("Playing music")
-        except Exception as e:
-            gui.log_message(f"Error opening music: {e}")
+        # try:
+        #     with open("music.txt", "r") as f:
+        #         music_url = f.readline().strip()
+        #         if music_url:
+        #             webbrowser.open(music_url, new=0, autoraise=True)
+        #             gui.log_message("Playing music")
+        # except Exception as e:
+        #     gui.log_message(f"Error opening music: {e}")
     elif new_phase == "WaitingForStats":
         game_state.in_game = False
         game_state.reset()
@@ -611,7 +626,7 @@ async def gameflow_phase_changed(connection, event):
 
 @connector.ready
 async def connect(connection):
-    global client_connected, gui, champions_map, current_region, lobby_info_task
+    global client_connected, gui, champions_map, champions_id_to_name, current_region, lobby_info_task
     client_connected = True  # Set flag when connected
     gui.set_connection_state(True)
     gui.game_status.set("Connected to League Client")
@@ -648,6 +663,7 @@ async def connect(connection):
     for champion in champion_list_to_json:
         temp_champions_map.update({champion['name']: champion['id']})
     champions_map = temp_champions_map
+    champions_id_to_name = {cid: name for name, cid in champions_map.items()}
     gui.log_message(f"Champions loaded: {len(champions_map)}")
 
     # Update the dropdowns with the champions list
@@ -855,21 +871,53 @@ async def champ_select_changed(connection, event):
                         gui.log_message(f"Error auto-picking {selected_pick}: {e}")
                 game_state.am_i_picking = False
 
-            # Pre-pick in PLANNING phase
-            if lobby_phase == 'PLANNING' and game_state.action_id is not None and role_config:
+            # Pre-hover our intended pick as early as possible in champ select, so
+            # teammates can see our intent before it's actually our turn to pick.
+            # (Previously this reused game_state.action_id, which could point at a
+            # ban action instead of the pick action - fixed by locating our own
+            # pick action directly.)
+            own_pick_action = None
+            for action_group in event.data['actions']:
+                for action in action_group:
+                    if action['actorCellId'] == local_player_cell_id and action['type'] == 'pick':
+                        own_pick_action = action
+                        break
+                if own_pick_action:
+                    break
+
+            if own_pick_action and not own_pick_action['completed'] and not own_pick_action['isInProgress'] and role_config:
                 selected_pick = role_config["pick_var"].get()
                 if selected_pick != "None" and selected_pick in champions_map:
-                    if not hasattr(champ_select_changed,
-                                   'last_prepick') or champ_select_changed.last_prepick != selected_pick:
+                    desired_id = champions_map[selected_pick]
+                    if own_pick_action.get('championId') != desired_id:
                         try:
                             await connection.request('patch',
-                                                     f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
-                                                     data={"championId": champions_map[selected_pick],
-                                                           "completed": False})
-                            gui.log_message(f"Pre-picked {selected_pick}")
-                            champ_select_changed.last_prepick = selected_pick  # Track last pre-picked champion
+                                                     f"/lol-champ-select/v1/session/actions/{own_pick_action['id']}",
+                                                     data={"championId": desired_id, "completed": False})
+                            gui.log_message(f"Pre-hovering {selected_pick}")
                         except Exception as e:
-                            gui.log_message(f"Error pre-picking {selected_pick}: {e}")
+                            gui.log_message(f"Error pre-hovering {selected_pick}: {e}")
+
+            # Track what teammates are hovering/picking and log changes.
+            # 'championPickIntent' is the hovered (not-yet-locked) champion;
+            # 'championId' is populated once they actually lock it in.
+            for teammate in event.data['myTeam']:
+                cell_id = teammate['cellId']
+                if cell_id == local_player_cell_id:
+                    continue  # Skip ourselves - our own hover is already logged above
+
+                locked_id = teammate.get('championId', 0)
+                hover_id = teammate.get('championPickIntent', 0)
+                display_id = locked_id or hover_id
+                previous_id = game_state.teammate_champions.get(cell_id)
+
+                if display_id and display_id != previous_id:
+                    champ_name = champions_id_to_name.get(display_id, f"Champion {display_id}")
+                    position = teammate.get('assignedPosition', '').upper() or "Unknown"
+                    verb = "locked in" if locked_id else "hovering"
+                    gui.log_message(f"Teammate ({position}) {verb} {champ_name}")
+
+                game_state.teammate_champions[cell_id] = display_id
 
         # Set up game start detection for finalization phase
         if lobby_phase == 'FINALIZATION' and game_state.current_lobby_state != "GAME_STARTING":
