@@ -9,6 +9,7 @@ import threading
 import asyncio
 import json
 import os
+import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -16,12 +17,102 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 global champions_map, client_connected, client_closed, gui, connector, current_region, client_closed
 champions_map = {}
 champions_id_to_name = {}  # Reverse lookup: champion id -> name, for showing teammate hovers
+current_summoner_id = None  # Cached once connected, used to re-fetch champion data if needed
 client_connected = False  # Tracks if the client is connected
 lobby_info_task = None  # Handle to the background lobby-info polling task
 client_closed = False  # Tracks if the client has been closed
 connector = Connector()  # Initialize the connector globally
 current_region = "NONE"  # Default region, will be updated on startup
 client_closed = False
+
+# Riot's LCU API reports internal codenames rather than what players actually
+# call a mode (e.g. Arena comes back as gameMode "CHERRY"), and Summoner's
+# Rift ranked/normal/blind all share gameMode "CLASSIC" - only the queue ID
+# tells them apart. These tables translate the raw values into readable names.
+#
+# Sources: most entries confirmed against Riot's official reference at
+# https://static.developer.riotgames.com/docs/lol/gameModes.json - note that
+# doc is the older/legacy static-data list and is itself incomplete (it does
+# not include Arena/"CHERRY" at all, for example). A few entries below
+# (CHERRY, PRACTICETOOL) are instead confirmed from live LCU API responses.
+# Anything not covered here falls back to the raw gameMode, title-cased, via
+# friendly_game_mode() below.
+GAME_MODE_NAMES = {
+    "CLASSIC": "Summoner's Rift",
+    "ODIN": "Dominion",  # Retired - Crystal Scar
+    "ARAM": "ARAM",
+    "TUTORIAL": "Tutorial",
+    "URF": "URF",
+    "ARURF": "ARURF",
+    "DOOMBOTSTEEMO": "Doom Bots",
+    "ONEFORALL": "One for All",
+    "ASCENSION": "Ascension",  # Retired
+    "FIRSTBLOOD": "Snowdown Showdown",  # Retired
+    "KINGPORO": "Legend of the Poro King",  # Retired
+    "SIEGE": "Nexus Siege",  # Retired
+    "ASSASSINATE": "Blood Hunt Assassin",  # Retired
+    "ARSR": "All Random Summoner's Rift",  # Retired
+    "DARKSTAR": "Dark Star: Singularity",  # Retired
+    "STARGUARDIAN": "Star Guardian Invasion",  # Retired
+    "PROJECT": "PROJECT: Hunters",  # Retired
+    "GAMEMODEX": "Nexus Blitz",  # Older codename, superseded by NEXUSBLITZ
+    "ODYSSEY": "Odyssey: Extraction",  # Retired
+    "NEXUSBLITZ": "Nexus Blitz",
+    "ULTBOOK": "Ultimate Spellbook",
+    "SWIFTPLAY": "Swiftplay",
+    "BRAWL": "Brawl",
+    "CHERRY": "Arena",
+    "PRACTICETOOL": "Practice Tool",
+}
+
+QUEUE_NAMES = {
+    400: "Normal Draft",
+    420: "Ranked Solo/Duo",
+    430: "Normal Blind",
+    440: "Ranked Flex",
+    450: "ARAM",
+    700: "Clash",
+    830: "Co-op vs AI (Intro)",
+    840: "Co-op vs AI (Beginner)",
+    850: "Co-op vs AI (Intermediate)",
+    900: "ARURF",
+    1020: "One for All",
+    1300: "Nexus Blitz",
+    1400: "Ultimate Spellbook",
+    1700: "Arena",
+    1710: "Arena",
+    1900: "URF",
+    2000: "Tutorial",
+    2010: "Tutorial",
+    2020: "Tutorial",
+}
+
+
+def friendly_game_mode(game_mode, queue_id=None):
+    """Translate a raw LCU gameMode/queueId pair into a readable mode name."""
+    if queue_id in QUEUE_NAMES:
+        return QUEUE_NAMES[queue_id]
+    if game_mode in GAME_MODE_NAMES:
+        return GAME_MODE_NAMES[game_mode]
+    if not game_mode or game_mode == "Unknown":
+        return "Unknown"
+    return game_mode.replace("_", " ").title()  # Best-effort fallback for anything new/unlisted
+
+
+def metasrc_champion_slug(champ_name):
+    """Convert a champion display name into MetaSRC's URL slug.
+
+    Confirmed pattern from real MetaSRC URLs: spaces become hyphens, while
+    other punctuation (apostrophes, periods, ampersands, etc.) is just
+    dropped. E.g. "Master Yi" -> "master-yi", "Dr. Mundo" -> "dr-mundo",
+    "Kai'Sa" -> "kaisa".
+    """
+    slug = champ_name.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)  # Drop apostrophes, periods, &, etc.
+    slug = re.sub(r"\s+", "-", slug)  # Spaces -> hyphens
+    slug = re.sub(r"-{2,}", "-", slug)  # Collapse any repeated hyphens
+    return slug.strip("-")
+
 
 class GameState:
     """Class to manage game-related states."""
@@ -36,6 +127,8 @@ class GameState:
         self.current_lobby_state = "NONE"
         self.current_assigned_position = "NONE"
         self.teammate_champions = {}  # cellId -> last known championId (hover/pick tracking)
+        self.build_link_opened_for = None  # championId we've already opened a build page for
+        self.detected_game_mode = None  # Raw gameMode string (e.g. "CHERRY" for Arena)
 
     def reset(self):
         """Reset all states to default values."""
@@ -48,6 +141,8 @@ class GameState:
         self.current_lobby_state = "NONE"
         self.current_assigned_position = "NONE"
         self.teammate_champions = {}
+        self.build_link_opened_for = None
+        self.detected_game_mode = None
 
 
 # Create a global instance of GameState
@@ -104,6 +199,7 @@ class LeagueGUI:
         self.champ_select_phase = tk.StringVar(value="N/A")
         self.selected_roles = tk.StringVar(value="Roles: N/A")
         self.auto_accept_var = tk.BooleanVar(value=False)
+        self.auto_open_build_var = tk.BooleanVar(value=True)
 
         # Role-specific variables (lane roles + the "ANY" fallback for roleless modes)
         self.role_configs = {
@@ -115,6 +211,29 @@ class LeagueGUI:
             }
             for role in self.all_config_keys
         }
+
+        # Auto-save whenever a setting actually changes, instead of relying on
+        # every code path remembering to call save_configuration() manually.
+        # Debounced so rapid changes (e.g. typing) don't hammer the disk.
+        self._autosave_after_id = None
+        self._autosave_enabled = False  # Turned on after load_configuration() runs at startup
+
+        def _schedule_autosave(*_args):
+            if not self._autosave_enabled:
+                return
+            if self._autosave_after_id:
+                try:
+                    self.root.after_cancel(self._autosave_after_id)
+                except Exception:
+                    pass
+            self._autosave_after_id = self.root.after(800, self.save_configuration)
+
+        self._schedule_autosave = _schedule_autosave
+        self.auto_accept_var.trace_add("write", _schedule_autosave)
+        self.auto_open_build_var.trace_add("write", _schedule_autosave)
+        for role in self.all_config_keys:
+            self.role_configs[role]["ban_var"].trace_add("write", _schedule_autosave)
+            self.role_configs[role]["pick_var"].trace_add("write", _schedule_autosave)
 
         # --- Scrollable container -------------------------------------------------
         # Wraps all content in a canvas+scrollbar so nothing (like the button row)
@@ -198,6 +317,12 @@ class LeagueGUI:
                                                     command=self.save_configuration)
         self.auto_accept_button.grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=2)
 
+        # Auto-Open Build Page Checkbox
+        self.auto_open_build_button = ttk.Checkbutton(
+            info_frame, text="Open MetaSRC Build Page on Lock-In",
+            variable=self.auto_open_build_var, command=self.save_configuration)
+        self.auto_open_build_button.grid(row=7, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+
         # Notebook (Tabbed View for Roles)
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(pady=10, padx=10, fill="both", expand=True)
@@ -252,21 +377,20 @@ class LeagueGUI:
         self.opgg_button = ttk.Button(button_frame, text="Open op.gg", command=self.open_opgg)
         self.opgg_button.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
 
-        # Save Settings Button
-        self.save_button = ttk.Button(button_frame, text="Save Settings", command=self.save_configuration,
-                                       style="Accent.TButton")
-        self.save_button.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-
         # Quit Button
         self.quit_button = ttk.Button(button_frame, text="Quit", command=self.quit_program)
-        self.quit_button.grid(row=0, column=2, padx=5, pady=5, sticky="ew")
+        self.quit_button.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
         # Configure column weights to make buttons expand evenly
-        for col in range(3):
+        for col in range(2):
             button_frame.columnconfigure(col, weight=1)
 
         # Load configuration
         self.load_configuration()
+
+        # Only now start auto-saving on changes - avoids the widget-construction
+        # defaults ("None") or the load itself triggering an immediate overwrite.
+        self._autosave_enabled = True
 
         # Start the GUI update loop
         self.update_gui()
@@ -450,6 +574,10 @@ class LeagueGUI:
                     if "auto_accept" in config:
                         self.auto_accept_var.set(config["auto_accept"])
 
+                    # Load auto-open-build-page setting
+                    if "auto_open_build" in config:
+                        self.auto_open_build_var.set(config["auto_open_build"])
+
                 self.log_message("Configuration loaded successfully")
             else:
                 self.log_message("No configuration file found. Using default settings.")
@@ -459,7 +587,10 @@ class LeagueGUI:
     def save_configuration(self):
         """Save role-specific configuration to file."""
         try:
-            config = {"auto_accept": self.auto_accept_var.get()}
+            config = {
+                "auto_accept": self.auto_accept_var.get(),
+                "auto_open_build": self.auto_open_build_var.get(),
+            }
 
             # Save role configurations (lane roles + the roleless "ANY" fallback)
             for role in self.all_config_keys:
@@ -593,7 +724,7 @@ async def gameflow_phase_changed(connection, event):
                 lobby_info_json = await lobby_info.json()
                 game_mode = lobby_info_json.get('gameConfig', {}).get('gameMode', 'Unknown')
                 queue_id = lobby_info_json.get('gameConfig', {}).get('queueId', 0)
-                gui.game_status.set(f"In Queue - Mode: {game_mode} (Queue ID: {queue_id})")
+                gui.game_status.set(f"In Queue - {friendly_game_mode(game_mode, queue_id)}")
         except Exception as e:
             gui.log_message(f"Could not fetch queue mode: {e}")
     elif new_phase == "ReadyCheck":
@@ -624,17 +755,56 @@ async def gameflow_phase_changed(connection, event):
     gui.update_gui()
 
 
+async def load_champion_data(connection, summoner_id):
+    """Fetch (or refresh) the champion name<->id maps. Returns True on success.
+
+    This is split out from connect() so it can also be called as a safety net
+    from champ_select_changed if the initial load never completed.
+    """
+    global champions_map, champions_id_to_name
+    try:
+        champion_list = await connection.request(
+            'get', f'/lol-champions/v1/inventories/{summoner_id}/champions-minimal')
+        champion_list_to_json = await champion_list.json()
+        if isinstance(champion_list_to_json, list) and champion_list_to_json:
+            champions_map = {c['name']: c['id'] for c in champion_list_to_json}
+            champions_id_to_name = {cid: name for name, cid in champions_map.items()}
+            return True
+    except Exception:
+        pass
+    return False
+
+
 @connector.ready
 async def connect(connection):
-    global client_connected, gui, champions_map, champions_id_to_name, current_region, lobby_info_task
+    global client_connected, gui, champions_map, champions_id_to_name, current_region, lobby_info_task, current_summoner_id
     client_connected = True  # Set flag when connected
     gui.set_connection_state(True)
     gui.game_status.set("Connected to League Client")
     gui.log_message("Connected to League Client")
 
-    # Get the summoner name
-    summoner = await connection.request('get', '/lol-summoner/v1/current-summoner')
-    summoner_data = await summoner.json()
+    # Get the summoner name - retry briefly, since right after League launches
+    # the LCU API port can accept connections a moment before endpoints like
+    # this one are actually ready. Without this, launching the GUI before
+    # League could leave champions_map empty forever and silently break
+    # auto-ban/auto-pick.
+    summoner_data = None
+    for attempt in range(1, 11):
+        try:
+            summoner = await connection.request('get', '/lol-summoner/v1/current-summoner')
+            candidate = await summoner.json()
+            if candidate and candidate.get('summonerId'):
+                summoner_data = candidate
+                break
+        except Exception:
+            pass
+        gui.log_message(f"Waiting for League client to finish starting up... ({attempt}/10)")
+        await asyncio.sleep(1.5)
+
+    if not summoner_data:
+        gui.log_message("Could not fetch summoner info. Try reconnecting once League has fully loaded.")
+        return
+
     gui.summoner_name.set(f"{summoner_data['gameName']}#{summoner_data['tagLine']}")
     gui.log_message(f"Connected as: {summoner_data['gameName']}#{summoner_data['tagLine']}")
 
@@ -653,18 +823,20 @@ async def connect(connection):
 
     # Get the summoner ID and champion list
     summoner_id = summoner_data['summonerId']
+    current_summoner_id = summoner_id
 
-    # Get the list of champions
-    champion_list = await connection.request('get', f'/lol-champions/v1/inventories/{summoner_id}/champions-minimal')
-    champion_list_to_json = await champion_list.json()
+    # Load the champion list, retrying for the same reason as the summoner fetch above
+    champions_loaded = False
+    for attempt in range(1, 11):
+        if await load_champion_data(connection, summoner_id):
+            champions_loaded = True
+            gui.log_message(f"Champions loaded: {len(champions_map)}")
+            break
+        gui.log_message(f"Waiting for champion data to become available... ({attempt}/10)")
+        await asyncio.sleep(1.5)
 
-    # Populate the champions_map
-    temp_champions_map = {}
-    for champion in champion_list_to_json:
-        temp_champions_map.update({champion['name']: champion['id']})
-    champions_map = temp_champions_map
-    champions_id_to_name = {cid: name for name, cid in champions_map.items()}
-    gui.log_message(f"Champions loaded: {len(champions_map)}")
+    if not champions_loaded:
+        gui.log_message("Could not load champion list - auto-ban/pick will retry automatically once champion select starts.")
 
     # Update the dropdowns with the champions list
     gui.update_champion_dropdowns()
@@ -710,7 +882,7 @@ async def update_lobby_info(connection):
                         game_mode = lobby_info_json.get('gameConfig', {}).get('gameMode', 'Unknown')
                         queue_id = lobby_info_json.get('gameConfig', {}).get('queueId', 0)
 
-                        gui.game_status.set(f"In Lobby - Mode: {game_mode} (Queue ID: {queue_id})")
+                        gui.game_status.set(f"In Lobby - {friendly_game_mode(game_mode, queue_id)}")
 
                         # Fetch the player's selected roles from the localMember section
                         local_player_roles = "N/A"  # Default value
@@ -768,14 +940,26 @@ async def champ_select_changed(connection, event):
             try:
                 gameflow_resp = await connection.request('get', '/lol-gameflow/v1/session')
                 gameflow_json = await gameflow_resp.json()
-                mode = gameflow_json.get('gameData', {}).get('queue', {}).get('gameMode', 'Unknown')
-                gui.log_message(f"Game mode detected: {mode}")
+                queue_data = gameflow_json.get('gameData', {}).get('queue', {})
+                mode = queue_data.get('gameMode', 'Unknown')
+                queue_id = queue_data.get('id', 0)
+                game_state.detected_game_mode = mode
+                gui.log_message(f"Game mode detected: {friendly_game_mode(mode, queue_id)}")
             except Exception:
                 pass  # Non-critical - just skip the mode announcement if unavailable
 
         # Only proceed if we have a valid localPlayerCellId
         if 'localPlayerCellId' in event.data and event.data['localPlayerCellId'] is not None:
             local_player_cell_id = event.data['localPlayerCellId']
+
+            # Safety net: if the initial champion data load never completed
+            # (e.g. GUI connected right as League was still starting up),
+            # retry it here so auto-ban/pick still works this game.
+            if not champions_map and current_summoner_id:
+                if await load_champion_data(connection, current_summoner_id):
+                    gui.log_message(f"Champion data recovered: {len(champions_map)} champions loaded")
+                else:
+                    gui.log_message("Champion data still unavailable - auto-ban/pick disabled for now")
 
             # Check assigned position
             for teammate in event.data['myTeam']:
@@ -897,6 +1081,24 @@ async def champ_select_changed(connection, event):
                             gui.log_message(f"Pre-hovering {selected_pick}")
                         except Exception as e:
                             gui.log_message(f"Error pre-hovering {selected_pick}: {e}")
+
+            # Open a MetaSRC build page once our champion is actually locked in.
+            # Works regardless of whether it was auto-picked or picked manually.
+            if own_pick_action and own_pick_action.get('completed') and own_pick_action.get('championId'):
+                locked_champ_id = own_pick_action['championId']
+                if gui.auto_open_build_var.get() and game_state.build_link_opened_for != locked_champ_id:
+                    champ_name = champions_id_to_name.get(locked_champ_id)
+                    if champ_name:
+                        slug = metasrc_champion_slug(champ_name)
+                        # Arena has completely different itemization from Summoner's
+                        # Rift, so route to MetaSRC's Arena-specific build page there.
+                        if game_state.detected_game_mode == "CHERRY":
+                            build_url = f"https://www.metasrc.com/lol/arena/champions/{slug}/build"
+                        else:
+                            build_url = f"https://www.metasrc.com/lol/champions/{slug}/build"
+                        webbrowser.open(build_url)
+                        gui.log_message(f"Opened MetaSRC build page for {champ_name}")
+                    game_state.build_link_opened_for = locked_champ_id
 
             # Track what teammates are hovering/picking and log changes.
             # 'championPickIntent' is the hovered (not-yet-locked) champion;
