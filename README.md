@@ -2,88 +2,47 @@
 
 ![League of Legends Helper GUI](images/GUI_screenshot.png)
 
-*Script to auto-accept, auto-pick, and auto-ban in League of Legends.*
+*A desktop companion for the League client — auto-accept, auto-ban/pick, and more.*
 
 ---
 
-## **Overview**
+## Overview
 
-This project is a Python-based GUI tool designed to enhance your League of Legends experience by automating repetitive tasks during the matchmaking and champion selection phases. It interacts with the League of Legends client using the `lcu_driver` library to communicate with the League Client API (LCU). The tool is lightweight, easy to use, and helps you focus on your game strategy rather than manual inputs.
+A Python GUI that automates repetitive parts of matchmaking and champion select, using [`lcu_driver`](https://github.com/sousa-andre/lcu-driver) to talk to the League Client API.
 
----
+## Features
 
-## **Features**
+- **Auto-Accept** matches
+- **Per-role auto-ban / auto-pick** — set a champion for Top, Jungle, Mid, Bot, Support, plus a fallback **Other Modes** tab for Arena/ARAM/URF and anything without an assigned lane
+- **Pre-hover** your intended pick from the start of champ select, so teammates see it before your turn
+- **Teammate hover tracking** — logs what allies are hovering/locking in
+- **Searchable champion pickers** for bans/picks
+- **Live status panel** — summoner, connection state, readable game mode/queue (not raw codenames like `CHERRY`), champ select phase
+- **MetaSRC build page** opens automatically once you lock in, routed to the Arena-specific page when applicable
+- **One-click op.gg**
+- **Auto-saved settings** — no manual save needed
+- **Real-time log** of all actions
 
-- **Summoner Name Display**: Displays the currently logged-in summoner's name and tagline.
-- **Game Status Tracking**: Tracks the current game status (e.g., in lobby, in queue, in champion select, in game).
-- **Auto-Accept Matches**: Automatically accepts match queue when enabled.
-- **Auto-Ban Champion**: Allows users to pre-select a champion to be banned automatically during champion select.
-- **Auto-Pick Champion**: Allows users to pre-select a champion to be picked automatically during champion select.
-- **Role-Specific Configurations**: Set different auto-ban and auto-pick champions for each role (Top, Jungle, Mid, Bottom, Support).
-- **Searchable Champion Dropdowns**: Easily search and filter champions for banning and picking.
-- **Pre-Hover Champions**: Hovers over the selected champion during the PLANNING phase for a smoother experience.
-- **Persistent Settings**: Saves your last selected auto-ban and auto-pick choices for future games.
-- **Real-Time Logs**: Provides real-time logs of actions and events for transparency.
+## Installation
 
----
-
-## **Installation**
-
-### Prerequisites
-- **Python 3.8 or higher**: Download and install Python from [python.org](https://www.python.org/).
-- **League of Legends Client**: The tool requires the League of Legends client to be running.
-### Steps
-1. Clone the Repository:
+**Prerequisites:** [Python 3.8+](https://www.python.org/) and the League client running.
 
 ```bash
 git clone https://github.com/HyperKrille/LeagueOfLegends-Helper
 cd LeagueOfLegends-Helper
-```
-2. Install Dependencies:
-Install the required Python libraries using `pip`:
-```bash
 pip install -r requirements.txt
-```
-
-3. Run the Script:
-Launch the tool by running:
-```bash
 python GUI.py
 ```
 
-## Creating a .exe File
-
-To distribute the tool as a standalone executable, you can use `PyInstaller`. Follow these steps:
-
-1. **Install PyInstaller:**
+## Building a Standalone .exe
 
 ```bash
 pip install pyinstaller
+pyinstaller --onefile --windowed --name "LeagueHelper" --hidden-import lcu_driver GUI.py
 ```
-2. **Create the Executable:**
-Navigate to the project directory and run:
 
-```bash
-pyinstaller --onefile --windowed --add-data "music.txt;." GUI.py
-```
-* The `--onefile` flag bundles everything into a single executable.
+The executable will be in `dist/`. `--onefile` bundles everything into one file; `--windowed` hides the console window.
 
-* The `--windowed` flag prevents a terminal window from appearing when running the tool.
+## Configuration
 
-* The `--add-data` flag will include the `.txt` file with the executable.
-
-3. **Locate the Executable:**
-
-* The `.exe` file will be created in the `dist` folder inside your project directory.
-
-## Configuration File
-
-The tool saves your settings in a `role_config.json` file. This file stores:
-
-* Auto-ban and auto-pick selections for each role.
-* Auto-accept match preference.
-
-You can manually edit this file if needed, but changes made in the GUI will automatically update it.
-
-
-
+Settings (role bans/picks, auto-accept, etc.) are saved automatically to `role_config.json` next to the executable. You can edit it by hand if needed — the GUI will pick up changes on next launch.
