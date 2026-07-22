@@ -9,6 +9,7 @@ import threading
 import asyncio
 import json
 import os
+import random
 import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -99,6 +100,65 @@ def friendly_game_mode(game_mode, queue_id=None):
     return game_mode.replace("_", " ").title()  # Best-effort fallback for anything new/unlisted
 
 
+# Special value stored in a role's pick_var to mean "let the bot pick a random
+# champion" (e.g. mimicking Arena's Bravery pick, or just for fun elsewhere).
+BRAVERY_LABEL = "Bravery (Random Pick)"
+
+# Riot's real in-client Bravery pick (Arena) selects a fully random, non-banned
+# champion that stays hidden - even from teammates - until the game starts.
+# Observed in the wild: a teammate who hovered Bravery showed up with
+# championPickIntent == -3 instead of a real champion id, so -3 appears to be
+# the sentinel value the client itself uses for "Bravery selected, hidden".
+# We piggyback on that by sending -3 as the championId on our own pick
+# action. This is inferred from observed behavior, not documented by Riot, so
+# we fall back to visibly picking a random real champion if the client ever
+# rejects it (e.g. a future patch changes the sentinel).
+BRAVERY_SENTINEL_ID = -3
+
+
+async def try_bravery_action(connection, action_id, completed, exclude_ids=None):
+    """Attempt to select native in-client Bravery via the -3 sentinel id.
+
+    Returns (used_native_bravery, champion_id):
+    - (True, BRAVERY_SENTINEL_ID) if the client accepted the sentinel - the
+      pick stays hidden until the game starts, same as clicking Bravery
+      manually.
+    - (False, champion_id) if we had to fall back to visibly picking a random
+      real champion instead (champion_id will be a normal champion id).
+    - (False, None) if there were no champions available to fall back to.
+    """
+    try:
+        response = await connection.request(
+            'patch', f'/lol-champ-select/v1/session/actions/{action_id}',
+            data={"championId": BRAVERY_SENTINEL_ID, "completed": completed})
+        if 200 <= getattr(response, "status", 200) < 300:
+            return True, BRAVERY_SENTINEL_ID
+    except Exception:
+        pass  # Sentinel rejected - fall through to the visible-random fallback below
+
+    random_id = pick_random_champion(exclude_ids)
+    if random_id is None:
+        return False, None
+    await connection.request(
+        'patch', f'/lol-champ-select/v1/session/actions/{action_id}',
+        data={"championId": random_id, "completed": completed})
+    return False, random_id
+
+
+def pick_random_champion(exclude_ids=None):
+    """Pick a random champion id from the loaded champion pool for 'Bravery'.
+
+    exclude_ids lets us steer away from champions teammates have already
+    locked in, when that info is available - purely a nicety, not a hard
+    guarantee, since some modes allow duplicate picks anyway.
+    """
+    exclude_ids = exclude_ids or set()
+    available = [cid for cid in champions_map.values() if cid not in exclude_ids]
+    if not available:
+        available = list(champions_map.values())  # Fall back if everything got excluded
+    return random.choice(available) if available else None
+
+
 def metasrc_champion_slug(champ_name):
     """Convert a champion display name into MetaSRC's URL slug.
 
@@ -129,6 +189,12 @@ class GameState:
         self.teammate_champions = {}  # cellId -> last known championId (hover/pick tracking)
         self.build_link_opened_for = None  # championId we've already opened a build page for
         self.detected_game_mode = None  # Raw gameMode string (e.g. "CHERRY" for Arena)
+        self.bravery_champion_id = None  # Random champion rolled for this session's "Bravery" pick, if used
+        self.bravery_prehover_sent = False  # We can't read back the hidden Bravery hover, so track locally instead
+        self.completed_action_ids = set()  # Action ids we've already sent a "completed" patch for - the LCU
+        # fires session-update events very rapidly (often several per second, for any player's
+        # change), so without this we can end up re-sending the same ban/pick patch several times
+        # before the server's response catches up and is reflected back in a later event.
 
     def reset(self):
         """Reset all states to default values."""
@@ -143,6 +209,9 @@ class GameState:
         self.teammate_champions = {}
         self.build_link_opened_for = None
         self.detected_game_mode = None
+        self.bravery_champion_id = None
+        self.bravery_prehover_sent = False
+        self.completed_action_ids = set()
 
 
 # Create a global instance of GameState
@@ -481,6 +550,11 @@ class LeagueGUI:
             suggestion_listbox.delete(0, tk.END)
             suggestion_listbox.insert(tk.END, "None")
 
+            # "Bravery" is a pick-only concept (random champion, e.g. Arena's
+            # Bravery pick) - offer it in the pick list when it matches the search.
+            if kind == "pick" and (not search_text or search_text in BRAVERY_LABEL.lower()):
+                suggestion_listbox.insert(tk.END, BRAVERY_LABEL)
+
             if search_text:
                 filtered_champs = sorted(
                     champ for champ in champions_map.keys() if search_text in champ.lower())
@@ -555,11 +629,32 @@ class LeagueGUI:
         self.conn_dot.itemconfig(self.conn_dot_id, fill=color)
         self.conn_text.config(text="Connected" if connected else "Disconnected")
 
+    def get_config_path(self):
+        """Return the path to the persistent role config file."""
+        appdata_dir = os.getenv("APPDATA")
+        if os.name == "nt" and appdata_dir:
+            config_dir = os.path.join(appdata_dir, "LeagueOfLegendsHelper")
+        else:
+            config_dir = os.path.join(os.path.expanduser("~"), ".config", "LeagueOfLegendsHelper")
+
+        os.makedirs(config_dir, exist_ok=True)
+        return os.path.join(config_dir, "role_config.json")
+
     def load_configuration(self):
         """Load role-specific configuration from file."""
         try:
-            if os.path.exists("role_config.json"):
-                with open("role_config.json", "r") as file:
+            config_path = self.get_config_path()
+            legacy_path = os.path.join(os.getcwd(), "role_config.json")
+
+            if os.path.exists(config_path):
+                config_file = config_path
+            elif os.path.exists(legacy_path):
+                config_file = legacy_path
+            else:
+                config_file = None
+
+            if config_file:
+                with open(config_file, "r", encoding="utf-8") as file:
                     config = json.load(file)
 
                     # Load role configurations (lane roles + the roleless "ANY" fallback)
@@ -599,7 +694,8 @@ class LeagueGUI:
                     "pick": self.role_configs[role]["pick_var"].get()
                 }
 
-            with open("role_config.json", "w") as file:
+            config_path = self.get_config_path()
+            with open(config_path, "w", encoding="utf-8") as file:
                 json.dump(config, file, indent=4)
 
             self.log_message("Configuration saved")
@@ -631,7 +727,7 @@ class LeagueGUI:
             # If the current selections are not in the champions map, reset them to "None"
             if current_ban not in champions_map and current_ban != "None":
                 self.role_configs[role]["ban_var"].set("None")
-            if current_pick not in champions_map and current_pick != "None":
+            if current_pick not in champions_map and current_pick != "None" and current_pick != BRAVERY_LABEL:
                 self.role_configs[role]["pick_var"].set("None")
 
     def open_opgg(self):
@@ -1028,7 +1124,9 @@ async def champ_select_changed(connection, event):
                     champ_select_changed.last_role_config = gui.fallback_role_key  # Track last used role config
 
             # Auto-ban logic
-            if game_state.phase == 'ban' and lobby_phase == 'BAN_PICK' and game_state.am_i_banning and game_state.action_id is not None and role_config:
+            if (game_state.phase == 'ban' and lobby_phase == 'BAN_PICK' and game_state.am_i_banning
+                    and game_state.action_id is not None
+                    and game_state.action_id not in game_state.completed_action_ids and role_config):
                 selected_ban = role_config["ban_var"].get()
                 if selected_ban != "None" and selected_ban in champions_map:
                     try:
@@ -1037,22 +1135,60 @@ async def champ_select_changed(connection, event):
                                                  data={"championId": champions_map[selected_ban], "completed": True})
                         gui.log_message(f"Auto-banned {selected_ban}")
                         champ_select_changed.last_ban = selected_ban  # Track last banned champion
+                        game_state.completed_action_ids.add(game_state.action_id)
                     except Exception as e:
                         gui.log_message(f"Error auto-banning {selected_ban}: {e}")
                 game_state.am_i_banning = False
 
             # Auto-pick logic
-            if game_state.phase == 'pick' and lobby_phase == 'BAN_PICK' and game_state.am_i_picking and game_state.action_id is not None and role_config:
+            if (game_state.phase == 'pick' and lobby_phase == 'BAN_PICK' and game_state.am_i_picking
+                    and game_state.action_id is not None
+                    and game_state.action_id not in game_state.completed_action_ids and role_config):
                 selected_pick = role_config["pick_var"].get()
-                if selected_pick != "None" and selected_pick in champions_map:
+
+                if selected_pick == BRAVERY_LABEL:
+                    try:
+                        if game_state.bravery_champion_id is not None:
+                            # We already rolled a fallback champion while pre-hovering
+                            # (native Bravery wasn't available then either) - reuse it
+                            # instead of rolling again.
+                            await connection.request(
+                                'patch', f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
+                                data={"championId": game_state.bravery_champion_id, "completed": True})
+                            champ_name = champions_id_to_name.get(game_state.bravery_champion_id, "a random champion")
+                            gui.log_message(f"Auto-picked {champ_name} (Bravery fallback - native Bravery unavailable)")
+                            game_state.completed_action_ids.add(game_state.action_id)
+                        else:
+                            already_locked = {
+                                teammate.get('championId')
+                                for teammate in event.data['myTeam']
+                                if teammate.get('championId')
+                            }
+                            used_native, result_id = await try_bravery_action(
+                                connection, game_state.action_id, True, already_locked)
+                            if used_native:
+                                gui.log_message("Auto-picked Bravery (random champion, hidden until game start)")
+                                game_state.completed_action_ids.add(game_state.action_id)
+                            elif result_id is not None:
+                                champ_name = champions_id_to_name.get(result_id, "a random champion")
+                                gui.log_message(f"Auto-picked {champ_name} (Bravery fallback - native Bravery unavailable)")
+                                game_state.completed_action_ids.add(game_state.action_id)
+                            else:
+                                gui.log_message("Error auto-picking Bravery: no champions available")
+                        champ_select_changed.last_pick = "Bravery"
+                    except Exception as e:
+                        gui.log_message(f"Error auto-picking Bravery: {e}")
+                elif selected_pick != "None" and selected_pick in champions_map:
                     try:
                         await connection.request('patch',
                                                  f'/lol-champ-select/v1/session/actions/{game_state.action_id}',
                                                  data={"championId": champions_map[selected_pick], "completed": True})
                         gui.log_message(f"Auto-picked {selected_pick}")
                         champ_select_changed.last_pick = selected_pick  # Track last picked champion
+                        game_state.completed_action_ids.add(game_state.action_id)
                     except Exception as e:
                         gui.log_message(f"Error auto-picking {selected_pick}: {e}")
+
                 game_state.am_i_picking = False
 
             # Pre-hover our intended pick as early as possible in champ select, so
@@ -1071,7 +1207,29 @@ async def champ_select_changed(connection, event):
 
             if own_pick_action and not own_pick_action['completed'] and not own_pick_action['isInProgress'] and role_config:
                 selected_pick = role_config["pick_var"].get()
-                if selected_pick != "None" and selected_pick in champions_map:
+
+                if selected_pick == BRAVERY_LABEL:
+                    if not game_state.bravery_prehover_sent:
+                        already_locked = {
+                            teammate.get('championId')
+                            for teammate in event.data['myTeam']
+                            if teammate.get('championId')
+                        }
+                        try:
+                            used_native, result_id = await try_bravery_action(
+                                connection, own_pick_action['id'], False, already_locked)
+                            if used_native:
+                                gui.log_message("Pre-hovering Bravery (random champion, hidden until game start)")
+                                game_state.bravery_prehover_sent = True
+                            elif result_id is not None:
+                                # Remember the fallback roll so the final lock-in reuses this same champion.
+                                game_state.bravery_champion_id = result_id
+                                champ_name = champions_id_to_name.get(result_id, "a random champion")
+                                gui.log_message(f"Pre-hovering {champ_name} (Bravery fallback - native Bravery unavailable)")
+                                game_state.bravery_prehover_sent = True
+                        except Exception as e:
+                            gui.log_message(f"Error pre-hovering Bravery: {e}")
+                elif selected_pick != "None" and selected_pick in champions_map:
                     desired_id = champions_map[selected_pick]
                     if own_pick_action.get('championId') != desired_id:
                         try:
@@ -1114,7 +1272,10 @@ async def champ_select_changed(connection, event):
                 previous_id = game_state.teammate_champions.get(cell_id)
 
                 if display_id and display_id != previous_id:
-                    champ_name = champions_id_to_name.get(display_id, f"Champion {display_id}")
+                    if display_id == BRAVERY_SENTINEL_ID:
+                        champ_name = "Bravery (hidden until game start)"
+                    else:
+                        champ_name = champions_id_to_name.get(display_id, f"Champion {display_id}")
                     position = teammate.get('assignedPosition', '').upper() or "Unknown"
                     verb = "locked in" if locked_id else "hovering"
                     gui.log_message(f"Teammate ({position}) {verb} {champ_name}")
